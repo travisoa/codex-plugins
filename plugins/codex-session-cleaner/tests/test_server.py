@@ -1244,6 +1244,91 @@ class ElicitationLocaleTests(unittest.TestCase):
             server._parse_selection("9", sessions)
 
 
+class ElicitationFailureTests(unittest.TestCase):
+    """表单送不出去是故障，不能报成“用户取消了”。"""
+
+    def setUp(self):
+        self.original_app = server.APP
+        self.original_request = server.HOST.request
+        self.original_scan = server._scan_history_base_threads
+        server._scan_history_base_threads = lambda: []
+        server._HOST.clear()
+        server._MANAGER_CONTEXTS.clear()
+        server.APP = FakeApp(active=[
+            {"id": f"t-{i}", "name": f"会话 {i}", "cwd": "/tmp/p", "source": "vscode",
+             "updatedAt": 100 - i}
+            for i in range(3)
+        ])
+        server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"capabilities": {"elicitation": {"form": {}}}},
+        })
+
+    def tearDown(self):
+        server.APP = self.original_app
+        server.HOST.request = self.original_request
+        server._scan_history_base_threads = self.original_scan
+        server._HOST.clear()
+        server._MANAGER_CONTEXTS.clear()
+
+    def answers(self, *responses):
+        queue = list(responses)
+        def fake(method, params, timeout=120.0):
+            item = queue.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+        server.HOST.request = fake
+
+    def open(self):
+        return server.call_tool("select_sessions", {}, {"threadId": "manager"})
+
+    FILTER_OK = {"action": "accept", "content": {"scope": "all", "datePreset": "all", "tag": ""}}
+
+    def test_a_timed_out_filter_form_is_not_reported_as_cancelled(self):
+        self.answers(server.HostError("等待宿主响应 elicitation/create 超时。"))
+        note = self.open()["structuredContent"]["interactive"]["note"]
+        self.assertIn("未能显示筛选表单", note)
+        self.assertIn("超时", note)
+        self.assertNotIn("你已取消", note)
+
+    def test_a_declined_filter_form_still_reads_as_cancelled(self):
+        self.answers({"action": "decline"})
+        note = self.open()["structuredContent"]["interactive"]["note"]
+        self.assertIn("你已取消", note)
+        self.assertNotIn("未能显示", note)
+
+    def test_a_failed_pick_form_is_not_reported_as_cancelled(self):
+        self.answers(self.FILTER_OK, server.HostError("宿主连接已关闭。"))
+        note = self.open()["structuredContent"]["interactive"]["note"]
+        self.assertIn("未能完成选择", note)
+        self.assertNotIn("取消", note)
+
+    def test_a_failed_action_form_does_not_claim_the_user_cancelled(self):
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "1"}},
+            server.HostError("等待宿主响应 elicitation/create 超时。"),
+        )
+        outcome = self.open()["structuredContent"]["interactive"]
+        # 会话确实选好了，不能说成用户选了取消。
+        self.assertEqual(outcome["selectedThreadIds"], ["t-0"])
+        self.assertEqual(outcome["performed"], "none")
+        self.assertIn("未能显示操作表单", outcome["note"])
+        self.assertNotIn("你选择了取消", outcome["note"])
+
+    def test_a_genuinely_cancelled_action_still_says_so(self):
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "1"}},
+            {"action": "accept", "content": {"action": "cancel"}},
+        )
+        outcome = self.open()["structuredContent"]["interactive"]
+        self.assertEqual(outcome["performed"], "none")
+        self.assertIn("取消", outcome["note"])
+        self.assertNotIn("未能显示", outcome["note"])
+
+
 class DeleteToolTests(unittest.TestCase):
     """delete_sessions 不再自行弹表单：确认由管理页或 select_sessions 各自完成。"""
 

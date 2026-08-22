@@ -1361,7 +1361,9 @@ DATE_PRESET_LABELS = {
 }
 
 
-def _elicit_filter(available_tags: list[dict[str, Any]], total: int) -> dict[str, str] | None:
+def _elicit_filter(
+    available_tags: list[dict[str, Any]], total: int
+) -> tuple[dict[str, str] | None, str | None]:
     """第一段：先把上百个会话收窄到能逐条勾选的规模。"""
     tag_keys = [""] + [str(tag.get("key")) for tag in available_tags]
     copy = _t()
@@ -1399,11 +1401,11 @@ def _elicit_filter(available_tags: list[dict[str, Any]], total: int) -> dict[str
     }
     try:
         result = HOST.request("elicitation/create", params, timeout=120.0)
-    except Exception:
-        return None
+    except Exception as exc:
+        return None, str(exc)
     result = result if isinstance(result, dict) else {}
     if str(result.get("action") or "") != "accept":
-        return None
+        return None, None
     content = result.get("content")
     content = content if isinstance(content, dict) else {}
     scope = str(content.get("scope") or "all")
@@ -1413,7 +1415,7 @@ def _elicit_filter(available_tags: list[dict[str, Any]], total: int) -> dict[str
         "scope": scope if scope in ("all", "active", "archived") else "all",
         "datePreset": date_preset if date_preset in DATE_PRESET_LABELS else "all",
         "tag": tag,
-    }
+    }, None
 
 
 def _parse_selection(raw: Any, sessions: list[dict[str, Any]]) -> list[str]:
@@ -1523,8 +1525,8 @@ def _elicit_pick(sessions: list[dict[str, Any]]) -> tuple[list[str] | None, str 
         }
         try:
             result = HOST.request("elicitation/create", params, timeout=120.0)
-        except Exception:
-            return None, None
+        except Exception as exc:
+            return None, str(exc)
         result = result if isinstance(result, dict) else {}
         if str(result.get("action") or "") != "accept":
             return None, None
@@ -1574,7 +1576,7 @@ def _elicit_pick(sessions: list[dict[str, Any]]) -> tuple[list[str] | None, str 
     return None, "多次输入未能确定选择，请重新打开会话管理页。"
 
 
-def _elicit_action(count: int) -> str:
+def _elicit_action(count: int) -> tuple[str, str | None]:
     """第三段：让用户直接选操作，默认取消。"""
     copy = _t()
     params = {
@@ -1595,15 +1597,15 @@ def _elicit_action(count: int) -> str:
     }
     try:
         result = HOST.request("elicitation/create", params, timeout=120.0)
-    except Exception:
-        return "cancel"
+    except Exception as exc:
+        return "cancel", str(exc)
     result = result if isinstance(result, dict) else {}
     if str(result.get("action") or "") != "accept":
-        return "cancel"
+        return "cancel", None
     content = result.get("content")
     content = content if isinstance(content, dict) else {}
     choice = str(content.get("action") or "cancel")
-    return choice if choice in ("cancel", "archive", "delete") else "cancel"
+    return (choice if choice in ("cancel", "archive", "delete") else "cancel"), None
 
 
 def _run_picked_action(
@@ -1644,7 +1646,9 @@ def _run_picked_action(
 def _interactive_pick(current_id: str | None, data: dict[str, Any]) -> dict[str, Any]:
     """筛选 → 选择 → 操作三步交互。"""
     sessions = data.get("sessions") or []
-    chosen = _elicit_filter(data.get("availableTags") or [], len(sessions))
+    chosen, failure = _elicit_filter(data.get("availableTags") or [], len(sessions))
+    if failure:
+        return {"data": data, "outcome": {"note": f"未能显示筛选表单（{failure}），未做任何改动。"}}
     if chosen is None:
         return {"data": data, "outcome": {"note": "你已取消，未做任何改动。"}}
 
@@ -1664,16 +1668,21 @@ def _interactive_pick(current_id: str | None, data: dict[str, Any]) -> dict[str,
         outcome["note"] = "该筛选条件下的会话都受保护，无法归档或删除。"
         return {"data": filtered, "outcome": outcome}
 
-    picked, parse_error = _elicit_pick(candidates)
-    if parse_error:
-        outcome["note"] = f"{parse_error} 请重新打开会话管理页再选一次。"
+    picked, failure = _elicit_pick(candidates)
+    if failure:
+        outcome["note"] = f"未能完成选择（{failure}），未做任何改动。"
     elif picked is None:
         outcome["note"] = "你已取消选择，未做任何改动。"
     elif not picked:
         outcome["note"] = "没有勾选任何会话，未做任何改动。"
     else:
         outcome["selectedThreadIds"] = picked
-        _run_picked_action(_elicit_action(len(picked)), picked, current_id, outcome)
+        action, failure = _elicit_action(len(picked))
+        if failure:
+            outcome["performed"] = "none"
+            outcome["note"] = f"未能显示操作表单（{failure}），已选中的会话未做任何改动。"
+        else:
+            _run_picked_action(action, picked, current_id, outcome)
     return {"data": filtered, "outcome": outcome}
 
 
