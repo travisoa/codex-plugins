@@ -1203,8 +1203,6 @@ def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -
     }
 
 
-# 逐字段渲染的宿主上，字段太多会让用户按很多次回车，超过就改用整体确认。
-ELICIT_FIELD_LIMIT = 8
 # 序号输入只占一个字段，候选分页列出，避免一次塞进过长的提示语。
 TAG_LABELS_EN = {
     "hidden-fork": "Hidden fork",
@@ -1257,11 +1255,6 @@ ELICIT_TEXT = {
         "actionNames": lambda count: [
             "取消，不做任何操作", f"归档这 {count} 个会话", f"永久删除这 {count} 个会话（不可撤销）",
         ],
-        "confirmMessage": lambda count: f"即将永久删除以下 {count} 个会话，请把要删除的选为 True（不可撤销，项目文件不受影响）。",
-        "confirmBulk": lambda count, preview: f"即将永久删除 {count} 个会话，例如：{preview}……",
-        "confirmBulkTitle": lambda count: f"确认永久删除这 {count} 个会话？",
-        "confirmBulkDescription": "此操作不可撤销；如需逐个挑选，请先缩小选择范围。",
-        "confirmBulkNames": lambda count: ["取消", f"确认删除全部 {count} 个"],
         "outOfRange": lambda number, total: f"序号 {number} 超出范围 1-{total}。",
         "unparsable": lambda chunk: f"无法识别的序号“{chunk}”，请输入如 1,3,5-7 的形式。",
     },
@@ -1303,11 +1296,6 @@ ELICIT_TEXT = {
         "actionNames": lambda count: [
             "Cancel, do nothing", f"Archive these {count}", f"Permanently delete these {count} (cannot be undone)",
         ],
-        "confirmMessage": lambda count: f"About to permanently delete {count} session(s). Set the ones to delete to True (cannot be undone; project files are untouched).",
-        "confirmBulk": lambda count, preview: f"About to permanently delete {count} sessions, for example: {preview}…",
-        "confirmBulkTitle": lambda count: f"Permanently delete these {count} sessions?",
-        "confirmBulkDescription": "This cannot be undone. To pick individually, narrow the selection first.",
-        "confirmBulkNames": lambda count: ["Cancel", f"Delete all {count}"],
         "outOfRange": lambda number, total: f"Number {number} is outside 1-{total}.",
         "unparsable": lambda chunk: f"Cannot read \"{chunk}\"; use a form like 1,3,5-7.",
     },
@@ -1360,80 +1348,6 @@ def _elicit_target_labels(thread_id: str, item: dict[str, Any]) -> tuple[str, st
         parts.append(copy["blockedBy"](item["blockingForkCount"]))
     parts.append(thread_id[:8])
     return title, " · ".join(parts)
-
-
-def _confirm_delete_targets(
-    ids: list[str], by_id: dict[str, dict[str, Any]], *, from_manager: bool
-) -> tuple[list[str], str | None]:
-    """Have the user settle the final delete list when the model chose it alone.
-
-    A call carrying a manager-page context was already driven by the user
-    picking rows there, so it is passed through. Anything else is a list the
-    model assembled, and gets confirmed whenever the host can show a form.
-
-    Returns (confirmed ids, refusal reason). The reason is set whenever the
-    deletion must not proceed, so a failed or declined prompt never falls
-    through to deleting everything the model proposed.
-    """
-    if from_manager or not _host_supports_elicitation():
-        return ids, None
-
-    if len(ids) <= ELICIT_FIELD_LIMIT:
-        properties: dict[str, Any] = {}
-        for thread_id in ids:
-            title, detail = _elicit_target_labels(thread_id, by_id.get(thread_id, {}))
-            properties[thread_id] = {
-                "type": "boolean",
-                "title": title,
-                "description": detail,
-                "default": False,
-            }
-        params = {
-            "message": _t()["confirmMessage"](len(ids)),
-            "requestedSchema": {"type": "object", "properties": properties},
-        }
-    else:
-        preview = "；".join(
-            _elicit_target_labels(thread_id, by_id.get(thread_id, {}))[0] for thread_id in ids[:5]
-        )
-        copy = _t()
-        params = {
-            "message": copy["confirmBulk"](len(ids), preview),
-            "requestedSchema": {
-                "type": "object",
-                "properties": {
-                    "confirm": {
-                        "type": "string",
-                        "title": copy["confirmBulkTitle"](len(ids)),
-                        "description": copy["confirmBulkDescription"],
-                        "enum": ["cancel", "delete_all"],
-                        "enumNames": copy["confirmBulkNames"](len(ids)),
-                    }
-                },
-                "required": ["confirm"],
-            },
-        }
-
-    try:
-        result = HOST.request("elicitation/create", params, timeout=120.0)
-    except Exception as exc:
-        return [], f"未能向你确认删除名单（{exc}），已取消删除。"
-
-    result = result if isinstance(result, dict) else {}
-    if str(result.get("action") or "") != "accept":
-        return [], "你已取消删除。"
-    content = result.get("content")
-    content = content if isinstance(content, dict) else {}
-
-    if len(ids) <= ELICIT_FIELD_LIMIT:
-        confirmed = [thread_id for thread_id in ids if content.get(thread_id) is True]
-        if not confirmed:
-            return [], "没有勾选任何会话，已取消删除。"
-        return confirmed, None
-
-    if content.get("confirm") != "delete_all":
-        return [], "你已取消删除。"
-    return ids, None
 
 
 DATE_PRESET_LABELS = {
@@ -2030,25 +1944,12 @@ def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]
         data = archive_sessions(_validate_ids(arguments.get("threadIds")), current_id)
         return _text_result(data, _operation_text(data, "归档"))
     if name == "delete_sessions":
-        current_id, manager_context = _current_id_for_call(meta, arguments, require=True)
-        requested = _validate_ids(arguments.get("threadIds"))
-        confirmed, refusal = _confirm_delete_targets(
-            requested,
-            {item["id"]: item for item in list_sessions(current_id, "all", "")["sessions"]},
-            from_manager=bool(manager_context),
-        )
-        if refusal:
-            return _text_result(
-                {"operation": "delete", "results": [], "cancelled": True, "requestedThreadIds": requested},
-                refusal,
-            )
+        current_id, _ = _current_id_for_call(meta, arguments, require=True)
         data = delete_sessions(
-            confirmed,
+            _validate_ids(arguments.get("threadIds")),
             str(arguments.get("confirmation") or ""),
             current_id,
         )
-        if confirmed != requested:
-            data["requestedThreadIds"] = requested
         summary = _operation_text(data, "永久删除")
         if not data["sidebarSync"]["ok"]:
             summary += "\n侧边栏同步未完全成功；请刷新或重启 Codex。"

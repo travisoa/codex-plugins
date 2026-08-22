@@ -1244,11 +1244,8 @@ class ElicitationLocaleTests(unittest.TestCase):
             server._parse_selection("9", sessions)
 
 
-class ElicitationConfirmTests(unittest.TestCase):
-    """CLI 类宿主上，删除前必须由用户在表单里敲定最终名单。"""
-
-    CLI = {"elicitation": {"form": {}, "url": {}}}
-    DESKTOP = {"ui": {}, "elicitation": {"form": {}}}
+class DeleteToolTests(unittest.TestCase):
+    """delete_sessions 不再自行弹表单：确认由管理页或 select_sessions 各自完成。"""
 
     def setUp(self):
         self.original_app = server.APP
@@ -1260,6 +1257,10 @@ class ElicitationConfirmTests(unittest.TestCase):
         server._MANAGER_CONTEXTS.clear()
         server._HOST.clear()
         self.prompts = []
+        def fake(method, params, timeout=120.0):
+            self.prompts.append(params)
+            return {"action": "decline"}
+        server.HOST.request = fake
 
     def tearDown(self):
         server.APP = self.original_app
@@ -1269,116 +1270,51 @@ class ElicitationConfirmTests(unittest.TestCase):
         server._MANAGER_CONTEXTS.clear()
         server._HOST.clear()
 
-    def host(self, capabilities, count=3):
+    def host(self, capabilities):
         server.APP = FakeApp(active=[
-            {"id": f"t-{index}", "name": f"会话 {index}", "cwd": f"/tmp/p{index}",
-             "source": "vscode", "updatedAt": 1787411471 - index}
-            for index in range(count)
+            {"id": f"t-{i}", "name": f"会话 {i}", "cwd": f"/tmp/p{i}", "source": "vscode"}
+            for i in range(3)
         ])
         server.handle({
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {"capabilities": capabilities,
-                       "clientInfo": {"name": "codex-mcp-client", "title": "Codex"}},
+            "params": {"capabilities": capabilities},
         })
 
-    def answer(self, response):
-        def fake_request(method, params, timeout=120.0):
-            self.prompts.append((method, params))
-            return response
-        server.HOST.request = fake_request
+    def test_no_host_gets_an_extra_form_on_delete(self):
+        """管理页已收过确认词，CLI 该走 select_sessions；这里再弹一次只会重复。"""
+        for capabilities in (
+            {"ui": {}, "elicitation": {"form": {}}},   # 桌面端
+            {"elicitation": {"form": {}, "url": {}}},  # CLI
+            {"tools": {}},                             # 两者都不支持
+        ):
+            self.prompts = []
+            self.host(capabilities)
+            result = server.call_tool(
+                "delete_sessions",
+                {"threadIds": ["t-0"], "confirmation": "删除"},
+                {"threadId": "manager"},
+            )
+            self.assertEqual(self.prompts, [], capabilities)
+            self.assertTrue(result["structuredContent"]["results"][0]["ok"], capabilities)
 
-    def delete(self, ids):
-        return server.call_tool(
-            "delete_sessions",
-            {"threadIds": ids, "confirmation": "删除"},
-            {"threadId": "manager"},
-        )
+    def test_the_confirmation_word_is_still_required(self):
+        self.host({"elicitation": {"form": {}}})
+        with self.assertRaisesRegex(ValueError, "确认词"):
+            server.call_tool(
+                "delete_sessions",
+                {"threadIds": ["t-0"], "confirmation": "yes"},
+                {"threadId": "manager"},
+            )
 
-    def deleted(self, result):
-        return [row["threadId"] for row in result["structuredContent"]["results"] if row["ok"]]
-
-    def test_only_the_boxes_the_user_ticked_are_deleted(self):
-        self.host(self.CLI)
-        self.answer({"action": "accept", "content": {"t-0": True, "t-2": True}})
-        result = self.delete(["t-0", "t-1", "t-2"])
-        self.assertEqual(self.deleted(result), ["t-0", "t-2"])
-        self.assertEqual(result["structuredContent"]["requestedThreadIds"], ["t-0", "t-1", "t-2"])
-        schema = self.prompts[0][1]["requestedSchema"]["properties"]
-        self.assertEqual(list(schema), ["t-0", "t-1", "t-2"])
-        # 危险操作默认不勾选，用户必须主动选 True。
-        self.assertTrue(all(field["default"] is False for field in schema.values()))
-        self.assertIn("会话 0", schema["t-0"]["title"])
-        self.assertIn("/tmp/p0", schema["t-0"]["description"])
-
-    def test_ticking_nothing_deletes_nothing(self):
-        self.host(self.CLI)
-        self.answer({"action": "accept", "content": {}})
-        result = self.delete(["t-0", "t-1"])
-        self.assertTrue(result["structuredContent"]["cancelled"])
-        self.assertEqual(result["structuredContent"]["results"], [])
-        self.assertIn("没有勾选", result["content"][0]["text"])
-
-    def test_declining_the_prompt_deletes_nothing(self):
-        self.host(self.CLI)
-        self.answer({"action": "decline"})
-        result = self.delete(["t-0"])
-        self.assertEqual(result["structuredContent"]["results"], [])
-        self.assertIn("取消", result["content"][0]["text"])
-
-    def test_a_failed_prompt_never_falls_through_to_deleting(self):
-        self.host(self.CLI)
-        def boom(method, params, timeout=120.0):
-            raise server.HostError("宿主连接已关闭。")
-        server.HOST.request = boom
-        result = self.delete(["t-0", "t-1"])
-        self.assertEqual(result["structuredContent"]["results"], [])
-        self.assertIn("已取消删除", result["content"][0]["text"])
-
-    def test_large_batches_switch_to_a_single_confirmation(self):
-        self.host(self.CLI, count=12)
-        self.answer({"action": "accept", "content": {"confirm": "delete_all"}})
-        ids = [f"t-{index}" for index in range(12)]
-        result = self.delete(ids)
-        self.assertEqual(len(self.deleted(result)), 12)
-        schema = self.prompts[0][1]["requestedSchema"]["properties"]
-        self.assertEqual(list(schema), ["confirm"])
-        self.assertEqual(schema["confirm"]["enum"], ["cancel", "delete_all"])
-
-    def test_large_batch_cancel_deletes_nothing(self):
-        self.host(self.CLI, count=12)
-        self.answer({"action": "accept", "content": {"confirm": "cancel"}})
-        result = self.delete([f"t-{index}" for index in range(12)])
-        self.assertEqual(result["structuredContent"]["results"], [])
-
-    def test_a_request_from_the_manager_page_is_not_confirmed_again(self):
-        """管理页已由用户勾选过，不该再弹一次表单。"""
-        self.host(self.CLI)
-        opened = server.call_tool(
-            "open_session_manager", {}, {"openai/threadId": "manager"}
-        )["structuredContent"]
-        self.answer({"action": "decline"})
-        result = server.call_tool(
-            "delete_sessions",
-            {"threadIds": ["t-0"], "confirmation": "删除",
-             "managerContext": opened["managerContext"]},
-            None,
-        )
-        self.assertEqual(self.prompts, [])
-        self.assertEqual(self.deleted(result), ["t-0"])
-
-    def test_a_list_the_model_assembled_is_still_confirmed(self):
-        self.host(self.CLI)
-        self.answer({"action": "accept", "content": {"t-0": True}})
-        result = self.delete(["t-0", "t-1"])
-        self.assertEqual(len(self.prompts), 1)
-        self.assertEqual(self.deleted(result), ["t-0"])
-
-    def test_hosts_without_elicitation_are_not_prompted(self):
+    def test_batch_cap_still_applies(self):
         self.host({"tools": {}})
-        self.answer({"action": "decline"})
-        result = self.delete(["t-0"])
-        self.assertEqual(self.prompts, [])
-        self.assertEqual(self.deleted(result), ["t-0"])
+        with self.assertRaisesRegex(ValueError, f"最多处理 {server.BATCH_LIMIT}"):
+            server.call_tool(
+                "delete_sessions",
+                {"threadIds": [f"x-{i}" for i in range(server.BATCH_LIMIT + 1)],
+                 "confirmation": "删除"},
+                {"threadId": "manager"},
+            )
 
 
 if __name__ == "__main__":
