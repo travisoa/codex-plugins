@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import atexit
 import calendar
+import fcntl
 import json
 import os
 import queue
@@ -953,6 +954,7 @@ def list_sessions(
         if base_id and referrer_id:
             blockers.setdefault(base_id, []).append(referrer_id)
 
+    busy_ids = _busy_thread_ids({str(item.get("id") or "") for item, _ in raw})
     normalized = []
     for thread, archived in raw:
         if _is_derived_thread(thread) and not thread.get("hiddenFromList"):
@@ -969,7 +971,12 @@ def list_sessions(
             and matches_tag
         ):
             item["descendantCount"] = descendants(item["id"])
-            item["deletable"] = bool(current_id) and not item["current"] and not item["protected"] and not item["ephemeral"]
+            # 会话被别的 Codex 进程持有时改不动它：归档要搬走 rollout 文件。
+            item["busy"] = item["id"] in busy_ids
+            item["deletable"] = (
+                bool(current_id) and not item["current"] and not item["protected"]
+                and not item["ephemeral"] and not item["busy"]
+            )
             normalized.append(item)
     normalized.sort(key=lambda x: _timestamp_seconds(x.get("updatedAt")) or 0, reverse=True)
     tag_counts: dict[str, int] = {}
@@ -1065,6 +1072,40 @@ def _friendly_thread_error(exc: Exception) -> str:
             f"（原始错误：{detail}）"
         )
     return detail
+
+
+def _busy_thread_ids(thread_ids: set[str]) -> set[str]:
+    """Which sessions another Codex process is currently holding.
+
+    Codex guards each session with a flock on ~/.codex/thread-writer-locks/<id>.lock.
+    The file lingering is not enough — most of them are stale — so probe the lock
+    itself: if it cannot be taken, someone holds it. The probe takes the lock only
+    long enough to learn that, then releases it.
+    """
+    directory = _codex_home() / "thread-writer-locks"
+    if not directory.is_dir() or not thread_ids:
+        return set()
+    busy: set[str] = set()
+    for thread_id in thread_ids:
+        lock = directory / f"{thread_id}.lock"
+        if not lock.is_file():
+            continue
+        handle = None
+        try:
+            handle = os.open(lock, os.O_RDWR)
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        except OSError:
+            busy.add(thread_id)
+        except Exception:
+            pass  # 探测不了就当作空闲，宁可让操作去试，也不误标
+        finally:
+            if handle is not None:
+                try:
+                    os.close(handle)
+                except OSError:
+                    pass
+    return busy
 
 
 def _validate_ids(value: Any) -> list[str]:
@@ -1258,7 +1299,9 @@ def _session_line(index: int, item: dict[str, Any]) -> list[str]:
         flags.append("已归档")
     if item.get("ephemeral"):
         flags.append("临时")
-    if not item.get("deletable"):
+    if item.get("busy"):
+        flags.append("使用中，需在 Codex 侧边栏操作")
+    elif not item.get("deletable"):
         flags.append("不可删除")
     if item.get("blockingForkCount"):
         flags.append(f"{item['blockingForkCount']} 个引用分叉阻塞删除")
@@ -1356,6 +1399,7 @@ write_message = _write_message
 notify_desktop_sidebar = _notify_desktop_sidebar
 scan_history_base_threads = _scan_history_base_threads
 friendly_thread_error = _friendly_thread_error
+busy_thread_ids = _busy_thread_ids
 
 
 def build_handler(

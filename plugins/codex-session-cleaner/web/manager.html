@@ -150,6 +150,7 @@
           requestTimeout: '请求超时', toolFailed: '工具调用失败', requestFailed: '请求失败', unknownTime: '时间未知',
           sessions: count => `${count} 个会话`, selected: count => `· 已选 ${count}`, loading: '正在读取会话…', empty: '没有符合条件的会话',
           protected: '当前管理会话受保护', ephemeralProtected: '临时会话不可删除', selectSession: '选择会话',
+          busy: '使用中', busyHint: '该会话正被 Codex 打开，只能在侧边栏归档或删除',
           currentSession: '当前会话', archived: '已归档', ephemeral: '临时', unknownProject: '项目路径未知',
           branch: value => `分支 ${value}`, descendants: count => `${count} 个派生会话`, blockers: count => `${count} 个引用分叉阻止源会话删除`, source: id => `引用源 ${id}`,
           collapseFiles: '收起文件', inspectFiles: '查看文件', copyProject: '复制项目路径', loadingFiles: '正在读取会话文件线索…',
@@ -175,6 +176,7 @@
           requestTimeout: 'Request timed out', toolFailed: 'Tool call failed', requestFailed: 'Request failed', unknownTime: 'Unknown time',
           sessions: count => `${count} session${count === 1 ? '' : 's'}`, selected: count => `· ${count} selected`, loading: 'Loading sessions…', empty: 'No matching sessions',
           protected: 'Current manager session is protected', ephemeralProtected: 'Temporary sessions cannot be deleted', selectSession: 'Select session',
+          busy: 'In use', busyHint: 'This session is open in Codex; archive or delete it from the sidebar',
           currentSession: 'Current session', archived: 'Archived', ephemeral: 'Temporary', unknownProject: 'Unknown project path',
           branch: value => `Branch ${value}`, descendants: count => `${count} derived session${count === 1 ? '' : 's'}`, blockers: count => `${count} referencing fork${count === 1 ? '' : 's'} block source deletion`, source: id => `Source ${id}`,
           collapseFiles: 'Hide files', inspectFiles: 'View files', copyProject: 'Copy project path', loadingFiles: 'Loading session file clues…',
@@ -401,7 +403,7 @@
           const card = el('article', `card${session.current ? ' current' : ''}`);
           const checkbox = document.createElement('input'); checkbox.type = 'checkbox';
           checkbox.checked = state.selected.has(session.id); checkbox.disabled = !session.deletable || state.loading;
-          checkbox.title = session.current || session.protected ? t().protected : session.ephemeral ? t().ephemeralProtected : t().selectSession;
+          checkbox.title = session.busy ? t().busyHint : session.current || session.protected ? t().protected : session.ephemeral ? t().ephemeralProtected : t().selectSession;
           checkbox.addEventListener('change', () => { checkbox.checked ? state.selected.add(session.id) : state.selected.delete(session.id); render(); });
           card.append(checkbox);
 
@@ -409,6 +411,7 @@
           if (session.current) titleRow.append(el('span', 'badge current', t().currentSession));
           if (session.archived) titleRow.append(el('span', 'badge', t().archived));
           if (session.ephemeral) titleRow.append(el('span', 'badge', t().ephemeral));
+          if (session.busy) { const b = el('span', 'badge warning', t().busy); b.title = t().busyHint; titleRow.append(b); }
           for (const tag of session.tags || []) titleRow.append(el('span', `badge${tag.key === 'hidden-fork' ? ' warning' : ''}`, tagLabel(tag)));
           body.append(titleRow);
           if (session.preview && session.preview !== session.title) body.append(el('div', 'preview', session.preview));

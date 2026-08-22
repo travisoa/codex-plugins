@@ -962,5 +962,77 @@ class BusyThreadErrorTests(unittest.TestCase):
         self.assertEqual(core._friendly_thread_error(RuntimeError(detail)), detail)
 
 
+class BusySessionTests(unittest.TestCase):
+    """被别的 Codex 进程持有的会话改不动，得在列表里就标出来。"""
+
+    def setUp(self):
+        self.original_app = core.APP
+        self.original_scan = core._scan_history_base_threads
+        self.original_busy = core._busy_thread_ids
+        core._scan_history_base_threads = lambda: []
+        core.APP = FakeApp(active=[
+            {"id": "free", "name": "空闲会话", "cwd": "/tmp/a", "source": "vscode", "updatedAt": 9},
+            {"id": "held", "name": "正在用的会话", "cwd": "/tmp/b", "source": "vscode", "updatedAt": 8},
+        ])
+        core._busy_thread_ids = lambda ids: {"held"} & set(ids)
+
+    def tearDown(self):
+        core.APP = self.original_app
+        core._scan_history_base_threads = self.original_scan
+        core._busy_thread_ids = self.original_busy
+
+    def test_a_held_session_is_flagged_and_cannot_be_selected(self):
+        rows = {r["id"]: r for r in core.list_sessions("mgr", "all", "")["sessions"]}
+        self.assertTrue(rows["held"]["busy"])
+        self.assertFalse(rows["held"]["deletable"])
+        self.assertFalse(rows["free"]["busy"])
+        self.assertTrue(rows["free"]["deletable"])
+
+    def test_the_listing_says_why(self):
+        body = core.sessions_text(core.list_sessions("mgr", "all", ""))
+        self.assertIn("使用中", body)
+        self.assertIn("侧边栏", body)
+
+    def test_probing_a_stale_lock_file_does_not_flag_it(self):
+        """锁文件多数是残留，光看文件在不在会误标一堆。"""
+        core._busy_thread_ids = self.original_busy
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            locks = Path(tmp) / "thread-writer-locks"
+            locks.mkdir()
+            (locks / "stale.lock").write_bytes(b"")
+            previous = os.environ.get("CODEX_HOME")
+            os.environ["CODEX_HOME"] = tmp
+            try:
+                self.assertEqual(core._busy_thread_ids({"stale"}), set())
+            finally:
+                if previous is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = previous
+
+    def test_a_genuinely_locked_file_is_detected(self):
+        core._busy_thread_ids = self.original_busy
+        import fcntl, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            locks = Path(tmp) / "thread-writer-locks"
+            locks.mkdir()
+            target = locks / "taken.lock"
+            target.write_bytes(b"")
+            previous = os.environ.get("CODEX_HOME")
+            os.environ["CODEX_HOME"] = tmp
+            handle = os.open(target, os.O_RDWR)
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                self.assertEqual(core._busy_thread_ids({"taken"}), {"taken"})
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+                os.close(handle)
+                if previous is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = previous
+
+
 if __name__ == "__main__":
     unittest.main()
