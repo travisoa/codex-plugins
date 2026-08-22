@@ -77,10 +77,10 @@
         <button data-scope="active">当前</button><button data-scope="archived">已归档</button><button data-scope="all" class="active">全部</button>
       </div>
       <select id="tagFilter" class="tag-select" aria-label="按类别标签筛选">
-        <option value="">全部标签</option>
+        <option value="">标签</option>
       </select>
       <select id="datePreset" class="date-select" aria-label="按最后更新时间筛选">
-        <option value="all">全部日期</option>
+        <option value="all">日期</option>
         <option value="within_1_day">1 天内</option>
         <option value="within_1_week">1 周内</option>
         <option value="within_1_month">1 个月内</option>
@@ -225,7 +225,7 @@
           ? availableTags
           : [...new Map(state.sessions.flatMap(session => session.tags || []).map(tag => [tag.key, tag])).values()];
         const current = state.tag;
-        select.replaceChildren(new Option('全部标签', ''));
+        select.replaceChildren(new Option('标签', ''));
         for (const tag of tags) {
           const count = Number.isFinite(Number(tag.count)) ? ` · ${tag.count}` : '';
           select.append(new Option(`${tag.label}${count}`, tag.key));
