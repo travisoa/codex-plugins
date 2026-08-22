@@ -117,7 +117,7 @@
 
   <script>
     (() => {
-      const state = { sessions: [], selected: new Set(), scope: 'all', search: '', datePreset: 'all', customStart: '', customEnd: '', files: new Map(), loading: false };
+      const state = { sessions: [], selected: new Set(), scope: 'all', search: '', datePreset: 'all', customStart: '', customEnd: '', managerContext: '', files: new Map(), loading: false };
       const pending = new Map();
       let rpcId = 1;
       const $ = id => document.getElementById(id);
@@ -132,7 +132,8 @@
       }
 
       async function tool(name, args = {}) {
-        const result = await request('tools/call', { name, arguments: args });
+        const argumentsWithContext = state.managerContext ? { ...args, managerContext: state.managerContext } : args;
+        const result = await request('tools/call', { name, arguments: argumentsWithContext });
         if (result?.isError) throw new Error(result.content?.[0]?.text || '工具调用失败');
         return result?.structuredContent || result;
       }
@@ -206,6 +207,7 @@
       }
 
       function applySessions(data) {
+        if (typeof data.managerContext === 'string' && data.managerContext) state.managerContext = data.managerContext;
         state.sessions = Array.isArray(data.sessions) ? data.sessions : [];
         for (const id of [...state.selected]) if (!state.sessions.some(s => s.id === id && s.deletable)) state.selected.delete(id);
         render();
@@ -332,7 +334,7 @@
         try {
           const data = await tool('archive_sessions', { threadIds: [...state.selected] });
           const failed = (data.results || []).filter(r => !r.ok);
-          showToast(failed.length ? `${failed.length} 个会话归档失败` : '所选会话已归档');
+          showToast(failed.length ? `${failed.length} 个会话归档失败：${failed[0].error || '未知错误'}` : '所选会话已归档');
           state.selected.clear(); await refresh();
         } catch (error) { showToast(error.message); }
         finally { state.loading = false; render(); }
@@ -351,7 +353,7 @@
           const data = await tool('delete_sessions', { threadIds: [...state.selected], confirmation: '永久删除' });
           const failed = (data.results || []).filter(r => !r.ok);
           const syncFailed = data.sidebarSync && !data.sidebarSync.ok;
-          showToast(failed.length ? `${failed.length} 个会话删除失败` : syncFailed ? '会话已删除；侧边栏同步失败，请刷新或重启 Codex' : '所选会话已永久删除，侧边栏已同步');
+          showToast(failed.length ? `${failed.length} 个会话删除失败：${failed[0].error || '未知错误'}` : syncFailed ? '会话已删除；侧边栏同步失败，请刷新或重启 Codex' : '所选会话已永久删除，侧边栏已同步');
           state.selected.clear(); await refresh();
         } catch (error) { showToast(error.message); }
         finally { state.loading = false; render(); }

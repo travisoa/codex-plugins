@@ -30,6 +30,7 @@ SOURCE_KINDS = [
     "cli", "vscode", "exec", "appServer", "subAgent", "subAgentReview",
     "subAgentCompact", "subAgentThreadSpawn", "subAgentOther", "unknown",
 ]
+MANAGER_CONTEXT_TTL_SECONDS = 2 * 60 * 60
 DATE_PRESETS = {
     "all",
     "older_than_3_months",
@@ -167,6 +168,7 @@ class AppServerClient:
 
 APP = AppServerClient()
 atexit.register(APP.close)
+_MANAGER_CONTEXTS: dict[str, tuple[str, float]] = {}
 
 
 def _codex_home() -> Path:
@@ -373,6 +375,101 @@ def _thread_id_from_meta(meta: Any) -> str | None:
     return None
 
 
+def _purge_manager_contexts(now: float | None = None) -> None:
+    current = time.monotonic() if now is None else now
+    expired = [token for token, (_, expires_at) in _MANAGER_CONTEXTS.items() if expires_at <= current]
+    for token in expired:
+        _MANAGER_CONTEXTS.pop(token, None)
+
+
+def _create_manager_context(current_id: str | None) -> str | None:
+    if not current_id:
+        return None
+    _purge_manager_contexts()
+    token = uuid.uuid4().hex
+    _MANAGER_CONTEXTS[token] = (current_id, time.monotonic() + MANAGER_CONTEXT_TTL_SECONDS)
+    return token
+
+
+def _current_id_for_call(
+    meta: Any,
+    arguments: dict[str, Any],
+    *,
+    require: bool = False,
+) -> tuple[str | None, str | None]:
+    """Resolve the current thread from host metadata or an opaque manager-page context."""
+    current_id = _thread_id_from_meta(meta)
+    token_value = arguments.get("managerContext")
+    token = token_value.strip() if isinstance(token_value, str) else ""
+    if token:
+        _purge_manager_contexts()
+        context = _MANAGER_CONTEXTS.get(token)
+        if context is None:
+            raise ValueError("管理页上下文已失效，请重新打开 Codex 会话管理页。")
+        context_id, _ = context
+        if current_id and current_id != context_id:
+            raise ValueError("管理页上下文与当前任务不一致，请重新打开会话管理页。")
+        _MANAGER_CONTEXTS[token] = (
+            context_id,
+            time.monotonic() + MANAGER_CONTEXT_TTL_SECONDS,
+        )
+        return context_id, token
+    if require and not current_id:
+        raise ValueError("缺少当前任务上下文；为避免误操作，请重新打开 Codex 会话管理页。")
+    return current_id, None
+
+
+def _decode_source(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    if not stripped or stripped[0] not in "[{":
+        return value
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        return value
+
+
+def _nested_parent_thread_id(value: Any) -> str | None:
+    value = _decode_source(value)
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            normalized = str(key).replace("_", "").lower()
+            if normalized == "parentthreadid" and isinstance(nested, str) and nested.strip():
+                return nested.strip()
+        for nested in value.values():
+            parent = _nested_parent_thread_id(nested)
+            if parent:
+                return parent
+    elif isinstance(value, list):
+        for nested in value:
+            parent = _nested_parent_thread_id(nested)
+            if parent:
+                return parent
+    return None
+
+
+def _parent_thread_id(thread: dict[str, Any]) -> str | None:
+    for key in ("parentThreadId", "parent_thread_id"):
+        value = thread.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return _nested_parent_thread_id(thread.get("source"))
+
+
+def _is_derived_thread(thread: dict[str, Any]) -> bool:
+    if _parent_thread_id(thread):
+        return True
+    thread_source = str(thread.get("threadSource") or thread.get("thread_source") or "").lower()
+    if thread_source == "subagent":
+        return True
+    source = _decode_source(thread.get("source"))
+    if isinstance(source, dict):
+        return any(str(key).replace("_", "").lower().startswith("subagent") for key in source)
+    return "subagent" in str(source or "").replace("_", "").lower()
+
+
 def _status_name(status: Any) -> str:
     if isinstance(status, dict):
         return str(status.get("type") or status.get("status") or "unknown")
@@ -460,7 +557,7 @@ def _normalize_thread(thread: dict[str, Any], archived: bool, current_id: str | 
         "updatedAt": thread.get("updatedAt"),
         "archived": archived,
         "ephemeral": bool(thread.get("ephemeral")),
-        "parentThreadId": thread.get("parentThreadId"),
+        "parentThreadId": _parent_thread_id(thread),
         "status": _status_name(thread.get("status")),
         "source": thread.get("source"),
         "projectId": thread.get("projectId"),
@@ -512,7 +609,7 @@ def list_sessions(
         raw.extend((item, True) for item in _list_one(True, search))
     children: dict[str, list[str]] = {}
     for thread, _ in raw:
-        parent = thread.get("parentThreadId")
+        parent = _parent_thread_id(thread)
         child = thread.get("id")
         if parent and child:
             children.setdefault(str(parent), []).append(str(child))
@@ -530,12 +627,12 @@ def list_sessions(
 
     normalized = []
     for thread, archived in raw:
-        if thread.get("parentThreadId") is not None:
+        if _is_derived_thread(thread):
             continue
         item = _normalize_thread(thread, archived, current_id)
         if item["id"] and _matches_date_filter(item, date_start, date_end):
             item["descendantCount"] = descendants(item["id"])
-            item["deletable"] = not item["current"] and not item["protected"] and not item["ephemeral"]
+            item["deletable"] = bool(current_id) and not item["current"] and not item["protected"] and not item["ephemeral"]
             normalized.append(item)
     normalized.sort(key=lambda x: x.get("updatedAt") or 0, reverse=True)
     return {
@@ -623,6 +720,8 @@ def _validate_ids(value: Any) -> list[str]:
 
 
 def archive_sessions(ids: list[str], current_id: str | None) -> dict[str, Any]:
+    if not current_id:
+        raise ValueError("缺少当前任务上下文；为避免误操作，请重新打开 Codex 会话管理页。")
     results = []
     protected = {current_id} if current_id else set()
     for thread_id in ids:
@@ -693,6 +792,7 @@ def _tool_definitions() -> list[dict[str, Any]]:
                     },
                     "customStart": {"type": "string", "default": ""},
                     "customEnd": {"type": "string", "default": ""},
+                    "managerContext": {"type": "string", "description": "管理页内部上下文令牌。"},
                 },
             },
             "annotations": {"readOnlyHint": True, "destructiveHint": False},
@@ -711,7 +811,12 @@ def _tool_definitions() -> list[dict[str, Any]]:
             "title": "归档 Codex 会话",
             "description": "批量归档所选顶层会话；不会归档当前管理会话。",
             "inputSchema": {
-                "type": "object", "properties": {"threadIds": {"type": "array", "items": {"type": "string"}}}, "required": ["threadIds"]
+                "type": "object",
+                "properties": {
+                    "threadIds": {"type": "array", "items": {"type": "string"}},
+                    "managerContext": {"type": "string", "description": "管理页内部上下文令牌。"},
+                },
+                "required": ["threadIds"],
             },
             "annotations": {"readOnlyHint": False, "destructiveHint": False},
         },
@@ -724,6 +829,7 @@ def _tool_definitions() -> list[dict[str, Any]]:
                 "properties": {
                     "threadIds": {"type": "array", "items": {"type": "string"}},
                     "confirmation": {"type": "string", "const": "永久删除"},
+                    "managerContext": {"type": "string", "description": "管理页内部上下文令牌。"},
                 },
                 "required": ["threadIds", "confirmation"],
             },
@@ -741,9 +847,16 @@ def _text_result(data: dict[str, Any], summary: str) -> dict[str, Any]:
 
 
 def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]:
-    current_id = _thread_id_from_meta(meta)
-    if name in ("open_session_manager", "list_sessions"):
-        scope = "all" if name == "open_session_manager" else str(arguments.get("scope") or "all")
+    if name == "open_session_manager":
+        current_id = _thread_id_from_meta(meta)
+        manager_context = _create_manager_context(current_id)
+        data = list_sessions(current_id, "all", "")
+        if manager_context:
+            data["managerContext"] = manager_context
+        return _text_result(data, f"已列出 {data['total']} 个顶层 Codex 会话。")
+    if name == "list_sessions":
+        current_id, manager_context = _current_id_for_call(meta, arguments)
+        scope = str(arguments.get("scope") or "all")
         if scope not in ("active", "archived", "all"):
             raise ValueError("scope 必须是 active、archived 或 all。")
         data = list_sessions(
@@ -754,6 +867,8 @@ def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]
             str(arguments.get("customStart") or ""),
             str(arguments.get("customEnd") or ""),
         )
+        if manager_context:
+            data["managerContext"] = manager_context
         return _text_result(data, f"已列出 {data['total']} 个顶层 Codex 会话。")
     if name == "inspect_session_files":
         thread_id = str(arguments.get("threadId") or "").strip()
@@ -762,9 +877,11 @@ def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]
         data = inspect_files(thread_id)
         return _text_result(data, f"已提取 {len(data['changedFiles'])} 个修改文件和 {len(data['referencedFiles'])} 个引用文件线索。")
     if name == "archive_sessions":
+        current_id, _ = _current_id_for_call(meta, arguments, require=True)
         data = archive_sessions(_validate_ids(arguments.get("threadIds")), current_id)
         return _text_result(data, "归档操作已完成。")
     if name == "delete_sessions":
+        current_id, _ = _current_id_for_call(meta, arguments, require=True)
         data = delete_sessions(
             _validate_ids(arguments.get("threadIds")),
             str(arguments.get("confirmation") or ""),

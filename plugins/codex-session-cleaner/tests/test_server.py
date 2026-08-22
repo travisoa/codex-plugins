@@ -39,6 +39,7 @@ class SessionCleanerTests(unittest.TestCase):
     def setUp(self):
         self.original_app = server.APP
         self.original_sync = server.sync_desktop_sidebar
+        server._MANAGER_CONTEXTS.clear()
         server.sync_desktop_sidebar = lambda ids, cwd_by_id: {
             "ok": True,
             "catalog": {"removedThreadIds": list(ids), "error": None},
@@ -49,6 +50,7 @@ class SessionCleanerTests(unittest.TestCase):
     def tearDown(self):
         server.APP = self.original_app
         server.sync_desktop_sidebar = self.original_sync
+        server._MANAGER_CONTEXTS.clear()
 
     def test_extracts_thread_id_from_supported_metadata(self):
         self.assertEqual(server._thread_id_from_meta({"openai/threadId": "abc"}), "abc")
@@ -66,12 +68,40 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertEqual(data["sessions"][0]["descendantCount"], 2)
         self.assertTrue(data["sessions"][0]["deletable"])
 
+    def test_list_hides_all_subagent_source_shapes(self):
+        server.APP = FakeApp(active=[
+            {"id": "root", "name": "Root", "source": "vscode", "updatedAt": 4},
+            {
+                "id": "spawned-child",
+                "name": "Spawned child",
+                "source": {"subAgent": {"threadSpawn": {"parentThreadId": "root"}}},
+                "updatedAt": 3,
+            },
+            {
+                "id": "guardian",
+                "name": "Guardian",
+                "source": json.dumps({"subagent": {"other": "guardian"}}),
+                "updatedAt": 2,
+            },
+            {"id": "legacy-child", "name": "Legacy child", "source": "cli", "threadSource": "subagent", "updatedAt": 1},
+        ])
+        data = server.list_sessions("manager", "active")
+        self.assertEqual([row["id"] for row in data["sessions"]], ["root"])
+        self.assertEqual(data["sessions"][0]["descendantCount"], 1)
+
     def test_current_thread_is_not_deletable(self):
         server.APP = FakeApp(active=[
             {"id": "manager", "name": "Manager", "cwd": "/tmp/project", "parentThreadId": None},
         ])
         row = server.list_sessions("manager", "active")["sessions"][0]
         self.assertTrue(row["current"])
+        self.assertFalse(row["deletable"])
+
+    def test_sessions_are_not_selectable_without_current_context(self):
+        server.APP = FakeApp(active=[
+            {"id": "victim", "name": "Victim", "cwd": "/tmp/project", "source": "vscode"},
+        ])
+        row = server.list_sessions(None, "active")["sessions"][0]
         self.assertFalse(row["deletable"])
 
     def test_previous_manager_thread_can_be_deleted_from_new_manager_thread(self):
@@ -88,6 +118,50 @@ class SessionCleanerTests(unittest.TestCase):
         data = server.delete_sessions(["old-manager"], "永久删除", "new-manager")
         self.assertTrue(data["results"][0]["ok"])
         self.assertIn(("thread/delete", {"threadId": "old-manager"}), server.APP.calls)
+
+    def test_manager_context_survives_ui_calls_without_host_metadata(self):
+        server.APP = FakeApp(active=[
+            {"id": "old-manager", "name": "Old manager", "cwd": "/tmp", "source": "vscode"},
+            {"id": "new-manager", "name": "New manager", "cwd": "/tmp", "source": "vscode"},
+        ])
+        opened = server.call_tool(
+            "open_session_manager", {}, {"openai/threadId": "new-manager"}
+        )["structuredContent"]
+        context = opened["managerContext"]
+
+        refreshed = server.call_tool(
+            "list_sessions", {"scope": "all", "managerContext": context}, None
+        )["structuredContent"]
+        self.assertEqual(refreshed["currentThreadId"], "new-manager")
+        self.assertEqual(refreshed["managerContext"], context)
+        old_manager = next(row for row in refreshed["sessions"] if row["id"] == "old-manager")
+        self.assertTrue(old_manager["deletable"])
+
+        deleted = server.call_tool(
+            "delete_sessions",
+            {
+                "threadIds": ["old-manager"],
+                "confirmation": "永久删除",
+                "managerContext": context,
+            },
+            None,
+        )["structuredContent"]
+        self.assertTrue(deleted["results"][0]["ok"])
+        self.assertIn(("thread/delete", {"threadId": "old-manager"}), server.APP.calls)
+
+    def test_invalid_manager_context_is_rejected_before_deletion(self):
+        server.APP = FakeApp(active=[{"id": "victim", "name": "Victim", "source": "vscode"}])
+        with self.assertRaisesRegex(ValueError, "上下文已失效"):
+            server.call_tool(
+                "delete_sessions",
+                {
+                    "threadIds": ["victim"],
+                    "confirmation": "永久删除",
+                    "managerContext": "expired",
+                },
+                None,
+            )
+        self.assertFalse(any(method == "thread/delete" for method, _ in server.APP.calls))
 
     def test_session_listing_is_not_silently_truncated(self):
         active = [
@@ -258,6 +332,9 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertIn('value="older_than_3_months"', html)
         self.assertIn('id="customStart"', html)
         self.assertIn('id="customEnd"', html)
+        self.assertIn("managerContext: ''", html)
+        self.assertIn("{ ...args, managerContext: state.managerContext }", html)
+        self.assertIn("failed[0].error", html)
 
     def test_date_filter_options_keep_contrast_in_native_popup(self):
         html = server.UI_PATH.read_text(encoding="utf-8")
