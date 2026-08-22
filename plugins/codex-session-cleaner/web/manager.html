@@ -230,7 +230,7 @@
         const strong = document.createElement('strong'); strong.textContent = copy.confirmation;
         $('confirmationLabel').replaceChildren(document.createTextNode(copy.confirmationBefore), strong, document.createTextNode(copy.confirmationAfter));
         $('confirmation').placeholder = copy.confirmation; $('cancelDelete').textContent = copy.cancel; $('confirmDelete').textContent = copy.confirmDelete;
-        $('deleteHeading').textContent = copy.deleteHeading(state.selected.size);
+        $('deleteHeading').textContent = copy.deleteHeading(visibleSelection().length);
         updateTagOptions(state.availableTags);
       }
 
@@ -251,6 +251,8 @@
       }
 
       window.addEventListener('message', event => {
+        // 请求只发往 window.parent，因此也只接受来自 window.parent 的消息。
+        if (event.source !== window.parent) return;
         const message = event.data;
         if (!message || message.jsonrpc !== '2.0') return;
         if (message.id && pending.has(message.id) && ('result' in message || 'error' in message)) {
@@ -328,6 +330,10 @@
         });
       }
 
+      function visibleSelection(sessions = filteredSessions()) {
+        return sessions.filter(session => state.selected.has(session.id) && session.deletable).map(session => session.id);
+      }
+
       function updateTagOptions(availableTags) {
         const select = $('tagFilter');
         const tags = Array.isArray(availableTags) && availableTags.length
@@ -384,11 +390,12 @@
 
       function render() {
         const sessions = filteredSessions();
+        const selection = visibleSelection(sessions);
         $('list').replaceChildren();
         $('count').textContent = t().sessions(sessions.length);
-        $('selection').textContent = state.selected.size ? t().selected(state.selected.size) : '';
-        $('archive').disabled = !state.selected.size || state.loading;
-        $('delete').disabled = !state.selected.size || state.loading;
+        $('selection').textContent = selection.length ? t().selected(selection.length) : '';
+        $('archive').disabled = !selection.length || state.loading;
+        $('delete').disabled = !selection.length || state.loading;
         if (!sessions.length) { $('list').append(el('div', 'empty', state.loading ? t().loading : t().empty)); return; }
         for (const session of sessions) {
           const card = el('article', `card${session.current ? ' current' : ''}`);
@@ -472,10 +479,11 @@
       }
 
       async function archiveSelected() {
-        if (!state.selected.size) return;
+        const targets = visibleSelection();
+        if (!targets.length) return;
         state.loading = true; render();
         try {
-          const data = await tool('archive_sessions', { threadIds: [...state.selected] });
+          const data = await tool('archive_sessions', { threadIds: targets });
           const failed = (data.results || []).filter(r => !r.ok);
           showToast(failed.length ? t().archiveFailed(failed.length, failed[0].error || t().unknownError) : t().archivedSuccess);
           state.selected.clear(); await refresh();
@@ -484,16 +492,21 @@
       }
 
       function openDelete() {
-        $('deleteHeading').textContent = t().deleteHeading(state.selected.size); $('confirmation').value = ''; $('confirmDelete').disabled = true;
+        const targets = visibleSelection();
+        if (!targets.length) return;
+        $('deleteHeading').textContent = t().deleteHeading(targets.length); $('confirmation').value = ''; $('confirmDelete').disabled = true;
         $('deleteDialog').showModal(); setTimeout(() => $('confirmation').focus(), 30);
       }
 
       async function performDelete(event) {
         event.preventDefault();
         if ($('confirmation').value !== t().confirmation) return;
-        $('deleteDialog').close(); state.loading = true; render();
+        const targets = visibleSelection();
+        $('deleteDialog').close();
+        if (!targets.length) return;
+        state.loading = true; render();
         try {
-          const data = await tool('delete_sessions', { threadIds: [...state.selected], confirmation: t().confirmation });
+          const data = await tool('delete_sessions', { threadIds: targets, confirmation: t().confirmation });
           const failed = (data.results || []).filter(r => !r.ok);
           const syncFailed = data.sidebarSync && !data.sidebarSync.ok;
           showToast(failed.length ? t().deleteFailed(failed.length, failed[0].error || t().unknownError) : syncFailed ? t().sidebarSyncFailed : t().deletedSuccess);
@@ -502,7 +515,7 @@
         finally { state.loading = false; render(); }
       }
 
-      $('search').addEventListener('input', event => { state.search = event.target.value; render(); });
+      $('search').addEventListener('input', event => { state.search = event.target.value; state.selected.clear(); render(); });
       $('tagFilter').addEventListener('change', event => { state.tag = event.target.value; state.selected.clear(); render(); });
       $('datePreset').addEventListener('change', event => {
         state.datePreset = event.target.value;
@@ -513,7 +526,8 @@
       $('customStart').addEventListener('change', event => { state.customStart = event.target.value; state.selected.clear(); render(); });
       $('customEnd').addEventListener('change', event => { state.customEnd = event.target.value; state.selected.clear(); render(); });
       document.querySelectorAll('[data-scope]').forEach(button => button.addEventListener('click', () => {
-        state.scope = button.dataset.scope; document.querySelectorAll('[data-scope]').forEach(b => b.classList.toggle('active', b === button)); render();
+        state.scope = button.dataset.scope; state.selected.clear();
+        document.querySelectorAll('[data-scope]').forEach(b => b.classList.toggle('active', b === button)); render();
       }));
       document.querySelectorAll('[data-locale]').forEach(button => button.addEventListener('click', () => setLocale(button.dataset.locale, 'manual')));
       $('refresh').addEventListener('click', refresh);

@@ -152,7 +152,7 @@ class AppServerClient:
                     errors = "\n".join(list(self._stderr.queue)[-8:])
                     raise AppServerError(f"Codex app-server 已退出。{errors}")
                 ready, _, _ = select.select(
-                    [self.process.stdout], [], [], min(0.25, deadline - time.monotonic())
+                    [self.process.stdout], [], [], max(0.0, min(0.25, deadline - time.monotonic()))
                 )
                 if not ready:
                     continue
@@ -801,7 +801,8 @@ def _normalize_thread(thread: dict[str, Any], archived: bool, current_id: str | 
     }
 
 
-def _list_one(archived: bool, search: str = "") -> list[dict[str, Any]]:
+def _list_one(archived: bool) -> list[dict[str, Any]]:
+    """List every thread; searching happens locally so plugin-only fields stay matchable."""
     output: list[dict[str, Any]] = []
     cursor: str | None = None
     for _ in range(50):
@@ -814,8 +815,6 @@ def _list_one(archived: bool, search: str = "") -> list[dict[str, Any]]:
             "sourceKinds": SOURCE_KINDS,
             "useStateDbOnly": True,
         }
-        if search:
-            params["searchTerm"] = search
         result = APP.request("thread/list", params) or {}
         page = result.get("data", []) if isinstance(result, dict) else []
         output.extend(item for item in page if isinstance(item, dict))
@@ -834,16 +833,19 @@ def list_sessions(
     custom_end: str = "",
     tag: str = "",
     now: datetime | None = None,
+    *,
+    history_threads: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     date_start, date_end = _date_filter_bounds(
         date_preset, custom_start, custom_end, now
     )
     raw: list[tuple[dict[str, Any], bool]] = []
     if scope in ("active", "all"):
-        raw.extend((item, False) for item in _list_one(False, search))
+        raw.extend((item, False) for item in _list_one(False))
     if scope in ("archived", "all"):
-        raw.extend((item, True) for item in _list_one(True, search))
-    history_threads = _scan_history_base_threads()
+        raw.extend((item, True) for item in _list_one(True))
+    if history_threads is None:
+        history_threads = _scan_history_base_threads()
     history_by_id = {str(item.get("id") or ""): item for item in history_threads}
     visible_ids = {str(item.get("id") or "") for item, _ in raw}
     for index, (thread, archived) in enumerate(raw):
@@ -1004,11 +1006,21 @@ def _validate_ids(value: Any) -> list[str]:
 def archive_sessions(ids: list[str], current_id: str | None) -> dict[str, Any]:
     if not current_id:
         raise ValueError("缺少当前任务上下文；为避免误操作，请重新打开 Codex 会话管理页。")
+    # 复用删除路径的可管理性判断：必须是列表中的顶层会话，且不是当前会话或临时会话。
+    by_id = {item["id"]: item for item in list_sessions(current_id, "all", "")["sessions"]}
     results = []
-    protected = {current_id} if current_id else set()
     for thread_id in ids:
-        if thread_id in protected:
+        item = by_id.get(thread_id)
+        if thread_id == current_id:
             results.append({"threadId": thread_id, "ok": False, "error": "当前管理会话受保护。"})
+            continue
+        if item is None:
+            results.append(
+                {"threadId": thread_id, "ok": False, "error": "会话已不存在或不是顶层会话，请刷新后重试。"}
+            )
+            continue
+        if not item["deletable"]:
+            results.append({"threadId": thread_id, "ok": False, "error": "会话不可归档。"})
             continue
         try:
             APP.request("thread/archive", {"threadId": thread_id})
@@ -1051,6 +1063,19 @@ def _delete_order(ids: list[str], history_threads: list[dict[str, Any]]) -> list
     return ordered + [thread_id for thread_id in ids if thread_id not in ordered]
 
 
+def _describe_blockers(
+    blocker_ids: list[str], by_id: dict[str, dict[str, Any]], current_id: str | None
+) -> str:
+    descriptions = []
+    for blocker_id in blocker_ids[:3]:
+        blocker = by_id.get(blocker_id, {})
+        title = str(blocker.get("title") or "隐藏分叉")
+        marker = "（当前会话）" if blocker_id == current_id else ""
+        descriptions.append(f"{title} [{blocker_id}]{marker}")
+    suffix = "；另有更多阻塞分叉" if len(blocker_ids) > 3 else ""
+    return "、".join(descriptions) + suffix
+
+
 def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -> dict[str, Any]:
     if confirmation not in ("删除", "delete"):
         raise ValueError("确认词不正确，中文界面请输入“删除”，英文界面请输入“delete”。")
@@ -1058,7 +1083,8 @@ def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -
         raise ValueError("缺少当前会话元数据；为避免误删，已拒绝操作。请从 Codex 会话管理页执行。")
     if current_id in ids:
         raise ValueError("选中项包含当前管理会话，已拒绝整批删除。")
-    sessions = list_sessions(current_id, "all", "")["sessions"]
+    history_threads = _scan_history_base_threads()
+    sessions = list_sessions(current_id, "all", "", history_threads=history_threads)["sessions"]
     by_id = {item["id"]: item for item in sessions}
     unavailable = [thread_id for thread_id in ids if thread_id not in by_id]
     unsafe = [thread_id for thread_id in ids if thread_id in by_id and not by_id[thread_id]["deletable"]]
@@ -1066,39 +1092,41 @@ def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -
         raise ValueError("部分会话已不存在或不是顶层会话，请刷新后重试：" + ", ".join(unavailable))
     if unsafe:
         raise ValueError("部分会话不可删除：" + ", ".join(unsafe))
-    history_threads = _scan_history_base_threads()
     references = _history_reference_map(history_threads)
     selected = set(ids)
-    blockers = {
+    unselected_blockers = {
         thread_id: sorted(referrer for referrer in references.get(thread_id, []) if referrer not in selected)
         for thread_id in ids
     }
+    selected_referrers = {
+        thread_id: sorted(referrer for referrer in references.get(thread_id, []) if referrer in selected)
+        for thread_id in ids
+    }
     results = []
-    deleted_ids = []
+    deleted_ids: list[str] = []
+    deleted: set[str] = set()
     operation_order = _delete_order(ids, history_threads)
     for thread_id in operation_order:
-        if blockers[thread_id]:
-            descriptions = []
-            for blocker_id in blockers[thread_id][:3]:
-                blocker = by_id.get(blocker_id, {})
-                title = str(blocker.get("title") or "隐藏分叉")
-                marker = "（当前会话）" if blocker_id == current_id else ""
-                descriptions.append(f"{title} [{blocker_id}]{marker}")
-            suffix = "；另有更多阻塞分叉" if len(blockers[thread_id]) > 3 else ""
+        blocking = unselected_blockers[thread_id]
+        reason = "仍被分叉历史引用，请先选择并删除阻塞分叉："
+        if not blocking:
+            # 同批选中的引用分叉必须先删除成功，否则源会话会留下悬空引用。
+            blocking = [referrer for referrer in selected_referrers[thread_id] if referrer not in deleted]
+            reason = "同批选中的引用分叉未删除成功，已阻止删除源会话："
+        if blocking:
             results.append(
                 {
                     "threadId": thread_id,
                     "ok": False,
-                    "error": "仍被分叉历史引用，请先选择并删除阻塞分叉："
-                    + "、".join(descriptions)
-                    + suffix,
-                    "blockingThreadIds": blockers[thread_id],
+                    "error": reason + _describe_blockers(blocking, by_id, current_id),
+                    "blockingThreadIds": blocking,
                 }
             )
             continue
         try:
             APP.request("thread/delete", {"threadId": thread_id})
             deleted_ids.append(thread_id)
+            deleted.add(thread_id)
             results.append({"threadId": thread_id, "ok": True})
         except Exception as exc:
             results.append({"threadId": thread_id, "ok": False, "error": str(exc)})

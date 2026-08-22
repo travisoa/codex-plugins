@@ -18,19 +18,33 @@ SPEC.loader.exec_module(server)
 
 
 class FakeApp:
-    def __init__(self, active=None, archived=None, thread=None):
+    def __init__(self, active=None, archived=None, thread=None, failing_deletes=()):
         self.active = active or []
         self.archived = archived or []
         self.thread = thread or {}
+        self.failing_deletes = set(failing_deletes)
         self.calls = []
 
     def request(self, method, params):
         self.calls.append((method, params))
         if method == "thread/list":
-            return {"data": self.archived if params.get("archived") else self.active, "nextCursor": None}
+            data = self.archived if params.get("archived") else self.active
+            # 真实 app-server 只认识自己存储的字段，不知道插件本地生成的类别标签。
+            term = params.get("searchTerm")
+            if term:
+                data = [
+                    row for row in data
+                    if any(term.lower() in str(row.get(key) or "").lower()
+                           for key in ("id", "name", "preview", "cwd"))
+                ]
+            return {"data": data, "nextCursor": None}
         if method == "thread/read":
             return {"thread": self.thread}
-        if method in ("thread/delete", "thread/archive"):
+        if method == "thread/delete":
+            if params["threadId"] in self.failing_deletes:
+                raise RuntimeError("thread/delete 失败：会话正忙")
+            return {}
+        if method == "thread/archive":
             return {}
         raise AssertionError(method)
 
@@ -403,6 +417,128 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertEqual(data["operationOrder"], ["hidden-fork", "source"])
         self.assertTrue(all(result["ok"] for result in data["results"]))
 
+    def test_archive_rejects_targets_missing_from_the_manageable_list(self):
+        server.APP = FakeApp(active=[
+            {"id": "root", "name": "Root", "cwd": "/tmp/project", "source": "vscode"},
+            {"id": "child", "name": "Child", "cwd": "/tmp/project", "parentThreadId": "root"},
+            {"id": "temp", "name": "Temp", "cwd": "/tmp/project", "ephemeral": True},
+        ])
+        data = server.archive_sessions(["child", "temp", "ghost", "manager"], "manager")
+        by_id = {result["threadId"]: result for result in data["results"]}
+        self.assertFalse(by_id["child"]["ok"])
+        self.assertFalse(by_id["temp"]["ok"])
+        self.assertFalse(by_id["ghost"]["ok"])
+        self.assertFalse(by_id["manager"]["ok"])
+        self.assertIn("当前管理会话", by_id["manager"]["error"])
+        self.assertFalse(any(method == "thread/archive" for method, _ in server.APP.calls))
+
+    def test_archive_still_accepts_top_level_threads(self):
+        server.APP = FakeApp(active=[
+            {"id": "root", "name": "Root", "cwd": "/tmp/project", "source": "vscode"},
+        ])
+        data = server.archive_sessions(["root"], "manager")
+        self.assertTrue(data["results"][0]["ok"])
+        self.assertIn(("thread/archive", {"threadId": "root"}), server.APP.calls)
+
+    def test_app_server_timeout_does_not_pass_negative_select_timeout(self):
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, read_fd)
+        self.addCleanup(os.close, write_fd)
+
+        class Stream:
+            def write(self, data):
+                pass
+
+            def flush(self):
+                pass
+
+            def readline(self):
+                return ""
+
+            def fileno(self):
+                return read_fd
+
+        class Process:
+            def __init__(self):
+                self.stdin = Stream()
+                self.stdout = Stream()
+
+            def poll(self):
+                return None
+
+        client = server.AppServerClient(timeout=1.0)
+        client.process = Process()
+        # 截止时间在 while 判断之后才被越过，正是产生负超时的时序。
+        ticks = iter([0.0, 0.9, 2.0, 2.1])
+        last = [0.0]
+
+        def monotonic():
+            last[0] = next(ticks, last[0])
+            return last[0]
+
+        original = server.time.monotonic
+        server.time.monotonic = monotonic
+        try:
+            with self.assertRaisesRegex(server.AppServerError, "超时"):
+                client.request("thread/list", {}, ensure_started=False)
+        finally:
+            server.time.monotonic = original
+
+    def test_delete_scans_history_directory_only_once(self):
+        server.APP = FakeApp(active=[
+            {"id": "victim", "name": "Victim", "cwd": "/tmp/project", "source": "vscode"},
+        ])
+        scans = []
+
+        def counted_scan():
+            scans.append(1)
+            return []
+
+        server._scan_history_base_threads = counted_scan
+        data = server.delete_sessions(["victim"], "删除", "manager")
+        self.assertTrue(data["results"][0]["ok"])
+        self.assertEqual(len(scans), 1)
+
+    def test_delete_keeps_source_when_selected_fork_deletion_fails(self):
+        server.APP = FakeApp(
+            active=[{"id": "source", "name": "Source", "cwd": "/tmp/project"}],
+            failing_deletes={"hidden-fork"},
+        )
+        server._scan_history_base_threads = lambda: [{
+            "id": "hidden-fork",
+            "name": "Source (2)",
+            "cwd": "/tmp/project",
+            "archived": False,
+            "historyBaseThreadId": "source",
+            "hiddenFromList": True,
+        }]
+        data = server.delete_sessions(["source", "hidden-fork"], "删除", "manager")
+        by_id = {result["threadId"]: result for result in data["results"]}
+        self.assertFalse(by_id["hidden-fork"]["ok"])
+        self.assertFalse(by_id["source"]["ok"])
+        self.assertEqual(by_id["source"]["blockingThreadIds"], ["hidden-fork"])
+        self.assertIn("未删除成功", by_id["source"]["error"])
+        deleted = [params["threadId"] for method, params in server.APP.calls if method == "thread/delete"]
+        self.assertEqual(deleted, ["hidden-fork"])
+
+    def test_search_matches_generated_tag_labels(self):
+        server.APP = FakeApp(active=[
+            {"id": "plugin", "name": "修复插件", "cwd": "/tmp/codex-plugins", "updatedAt": 2},
+            {"id": "general", "name": "普通问答", "cwd": "/tmp", "updatedAt": 1},
+        ])
+        data = server.list_sessions("manager", "active", search="插件开发")
+        self.assertEqual([row["id"] for row in data["sessions"]], ["plugin"])
+
+    def test_search_is_applied_locally_not_pushed_to_app_server(self):
+        server.APP = FakeApp(active=[
+            {"id": "branch", "name": "重构", "cwd": "/tmp/project", "gitInfo": {"branch": "feature/cleanup"}},
+        ])
+        data = server.list_sessions("manager", "active", search="feature/cleanup")
+        self.assertEqual([row["id"] for row in data["sessions"]], ["branch"])
+        listed = [params for method, params in server.APP.calls if method == "thread/list"]
+        self.assertTrue(listed)
+        self.assertFalse(any("searchTerm" in params for params in listed))
+
     def test_catalog_cleanup_is_exact_and_updates_revision(self):
         with tempfile.TemporaryDirectory() as directory:
             codex_home = Path(directory)
@@ -502,6 +638,29 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertIn("event.target.value !== t().confirmation", html)
         self.assertIn('<button id="cancelDelete" type="button"', html)
         self.assertIn("$('cancelDelete').addEventListener('click', () => $('deleteDialog').close())", html)
+
+    def test_ui_confines_destructive_actions_to_visible_selection(self):
+        html = server.UI_PATH.read_text(encoding="utf-8")
+        self.assertIn("function visibleSelection(sessions = filteredSessions())", html)
+        self.assertIn("session.deletable", html)
+        self.assertIn(
+            "state.search = event.target.value; state.selected.clear();", html
+        )
+        self.assertIn("state.scope = button.dataset.scope; state.selected.clear();", html)
+        self.assertIn("const targets = visibleSelection();", html)
+        self.assertIn("tool('archive_sessions', { threadIds: targets })", html)
+        self.assertIn(
+            "tool('delete_sessions', { threadIds: targets, confirmation: t().confirmation })", html
+        )
+        self.assertNotIn("threadIds: [...state.selected]", html)
+
+    def test_ui_ignores_messages_from_other_windows(self):
+        html = server.UI_PATH.read_text(encoding="utf-8")
+        self.assertIn("if (event.source !== window.parent) return;", html)
+        self.assertLess(
+            html.index("if (event.source !== window.parent) return;"),
+            html.index("if (!message || message.jsonrpc !== '2.0') return;"),
+        )
 
     def test_date_filter_options_keep_contrast_in_native_popup(self):
         html = server.UI_PATH.read_text(encoding="utf-8")
