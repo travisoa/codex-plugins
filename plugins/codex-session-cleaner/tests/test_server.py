@@ -55,6 +55,7 @@ class SessionCleanerTests(unittest.TestCase):
         self.original_sync = server.sync_desktop_sidebar
         self.original_history_scan = server._scan_history_base_threads
         server._MANAGER_CONTEXTS.clear()
+        server._HOST.clear()
         server._scan_history_base_threads = lambda: []
         server.sync_desktop_sidebar = lambda ids, cwd_by_id: {
             "ok": True,
@@ -68,6 +69,7 @@ class SessionCleanerTests(unittest.TestCase):
         server.sync_desktop_sidebar = self.original_sync
         server._scan_history_base_threads = self.original_history_scan
         server._MANAGER_CONTEXTS.clear()
+        server._HOST.clear()
 
     def test_extracts_thread_id_from_supported_metadata(self):
         self.assertEqual(server._thread_id_from_meta({"openai/threadId": "abc"}), "abc")
@@ -591,6 +593,110 @@ class SessionCleanerTests(unittest.TestCase):
                 12,
             )
             connection.close()
+
+    def test_host_without_ui_capability_is_detected(self):
+        # 取自 Codex CLI v0.149.0 的真实 initialize 握手。
+        server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"elicitation": {"form": {}, "url": {}}},
+                "clientInfo": {"name": "codex-mcp-client", "title": "Codex", "version": "0.149.0"},
+            },
+        })
+        self.assertFalse(server._host_renders_ui())
+        self.assertEqual(server._HOST["clientInfo"]["title"], "Codex")
+
+    def test_unknown_host_is_never_downgraded_to_text_only(self):
+        server._HOST.clear()
+        self.assertIsNone(server._host_renders_ui())
+        self.assertEqual(server._tui_hint(), "")
+
+    def test_host_declaring_a_ui_capability_keeps_the_component(self):
+        for capabilities in (
+            {"ui": {}},
+            {"experimental": {"openai/outputTemplate": {}}},
+            {"experimental": {"mcpApps": {}}},
+        ):
+            server.handle({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"capabilities": capabilities},
+            })
+            self.assertTrue(server._host_renders_ui(), capabilities)
+            self.assertEqual(server._tui_hint(), "")
+
+    def test_text_fallback_lists_sessions_with_ids(self):
+        server._HOST.clear()
+        server.APP = FakeApp(active=[
+            {"id": "thread-1", "name": "继续修复相关问题", "cwd": "/tmp/codex-plugins", "updatedAt": 1787411471},
+        ])
+        result = server.call_tool("list_sessions", {"scope": "all"}, {"threadId": "manager"})
+        body = result["content"][0]["text"]
+        self.assertIn("thread-1", body)
+        self.assertIn("继续修复相关问题", body)
+        self.assertIn("/tmp/codex-plugins", body)
+        self.assertIn("可用标签", body)
+
+    def test_text_fallback_caps_the_listing_and_says_how_many_remain(self):
+        server._HOST.clear()
+        server.APP = FakeApp(active=[
+            {"id": f"thread-{index}", "name": f"会话 {index}", "cwd": "/tmp", "updatedAt": index}
+            for index in range(80)
+        ])
+        body = server.call_tool("list_sessions", {"scope": "all"}, {"threadId": "manager"})["content"][0]["text"]
+        self.assertIn("共 80 个可管理 Codex 会话", body)
+        self.assertIn("另有 50 个会话未列出", body)
+
+    def test_text_fallback_mentions_the_tui_only_for_hosts_without_ui(self):
+        server.APP = FakeApp(active=[{"id": "t", "name": "n", "cwd": "/tmp", "updatedAt": 1}])
+        server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"capabilities": {"elicitation": {"form": {}}}},
+        })
+        self.assertIn(
+            "launch_tui.sh",
+            server.call_tool("list_sessions", {}, {"threadId": "m"})["content"][0]["text"],
+        )
+        server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"capabilities": {"ui": {}}},
+        })
+        self.assertNotIn(
+            "launch_tui.sh",
+            server.call_tool("list_sessions", {}, {"threadId": "m"})["content"][0]["text"],
+        )
+
+    def test_operation_text_reports_each_failure(self):
+        server._HOST.clear()
+        server.APP = FakeApp(
+            active=[
+                {"id": "ok-1", "name": "A", "cwd": "/tmp", "source": "vscode"},
+                {"id": "bad-1", "name": "B", "cwd": "/tmp", "source": "vscode"},
+            ],
+            failing_deletes={"bad-1"},
+        )
+        result = server.call_tool(
+            "delete_sessions",
+            {"threadIds": ["ok-1", "bad-1"], "confirmation": "删除"},
+            {"threadId": "manager"},
+        )
+        body = result["content"][0]["text"]
+        self.assertIn("成功 1 个，失败 1 个", body)
+        self.assertIn("✓ ok-1", body)
+        self.assertIn("✗ bad-1", body)
+
+    def test_file_clue_text_lists_paths(self):
+        server._HOST.clear()
+        server.APP = FakeApp(thread={
+            "id": "t1", "cwd": "/work/project",
+            "turns": [{"items": [
+                {"type": "fileChange", "changes": [{"path": "src/a.py", "kind": "update"}]},
+            ]}],
+        })
+        body = server.call_tool("inspect_session_files", {"threadId": "t1"}, None)["content"][0]["text"]
+        self.assertIn("/work/project/src/a.py", body)
+        self.assertIn("修改文件 · 1", body)
+        self.assertIn("未从会话记录中发现", body)
 
     def test_mcp_resource_is_self_contained_html(self):
         response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {"uri": server.RESOURCE_URI}})

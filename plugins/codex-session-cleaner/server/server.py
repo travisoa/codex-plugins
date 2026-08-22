@@ -184,6 +184,8 @@ class AppServerClient:
 APP = AppServerClient()
 atexit.register(APP.close)
 _MANAGER_CONTEXTS: dict[str, tuple[str, float]] = {}
+# initialize 握手里的宿主信息，用于判断客户端能否渲染 MCP Apps 组件。
+_HOST: dict[str, Any] = {}
 
 
 def _codex_home() -> Path:
@@ -1217,6 +1219,116 @@ def _tool_definitions() -> list[dict[str, Any]]:
     ]
 
 
+def _record_host(params: Any) -> None:
+    if not isinstance(params, dict):
+        return
+    _HOST["clientInfo"] = params.get("clientInfo")
+    _HOST["capabilities"] = params.get("capabilities")
+    _HOST["protocolVersion"] = params.get("protocolVersion")
+
+
+def _host_renders_ui() -> bool | None:
+    """True/False 表示宿主是否声明了组件渲染能力，None 表示还无从判断。
+
+    未知时一律按“支持”处理，避免把新版宿主错误降级成纯文本。
+    """
+    capabilities = _HOST.get("capabilities")
+    if not isinstance(capabilities, dict):
+        return None
+    for key in ("ui", "components", "outputTemplates", "apps"):
+        if key in capabilities:
+            return True
+    experimental = capabilities.get("experimental")
+    if isinstance(experimental, dict):
+        for key in experimental:
+            lowered = str(key).lower()
+            if "ui" in lowered or "app" in lowered or "template" in lowered:
+                return True
+    return False
+
+
+def _tui_hint() -> str:
+    if _host_renders_ui() is not False:
+        return ""
+    return (
+        "\n\n当前客户端未声明组件渲染能力，已改用文本列表。"
+        "需要勾选式批量操作时，可在终端运行插件目录下的 scripts/launch_tui.sh。"
+    )
+
+
+def _session_line(index: int, item: dict[str, Any]) -> list[str]:
+    flags = []
+    if item.get("current"):
+        flags.append("当前会话")
+    if item.get("archived"):
+        flags.append("已归档")
+    if item.get("ephemeral"):
+        flags.append("临时")
+    if not item.get("deletable"):
+        flags.append("不可删除")
+    if item.get("blockingForkCount"):
+        flags.append(f"{item['blockingForkCount']} 个引用分叉阻塞删除")
+    tags = "/".join(str(tag.get("label")) for tag in item.get("tags") or [])
+    head = f"{index}. [{tags}] {item.get('projectName') or '未知项目'} · {item.get('title') or ''}"
+    if flags:
+        head += f" （{'、'.join(flags)}）"
+    detail = f"   ID {item.get('id')} · 更新于 {_format_timestamp(item.get('updatedAt'))}"
+    if item.get("cwd"):
+        detail += f" · {item['cwd']}"
+    return [head, detail]
+
+
+def _format_timestamp(value: Any) -> str:
+    seconds = _timestamp_seconds(value)
+    if seconds is None:
+        return "时间未知"
+    return datetime.fromtimestamp(seconds).strftime("%Y-%m-%d %H:%M")
+
+
+def _sessions_text(data: dict[str, Any], limit: int = 30) -> str:
+    """Readable listing for clients that cannot render the manager component."""
+    sessions = data.get("sessions") or []
+    total = data.get("total", len(sessions))
+    if not sessions:
+        return "没有符合条件的 Codex 会话。" + _tui_hint()
+    shown = sessions[:limit]
+    lines = [f"共 {total} 个可管理 Codex 会话" + (f"，以下为前 {len(shown)} 个：" if total > len(shown) else "：")]
+    for index, item in enumerate(shown, start=1):
+        lines.extend(_session_line(index, item))
+    if total > len(shown):
+        lines.append(f"…… 另有 {total - len(shown)} 个会话未列出，可用 search、tag 或 datePreset 参数缩小范围。")
+    available = data.get("availableTags") or []
+    if available:
+        lines.append("可用标签：" + "、".join(f"{tag['label']}({tag['count']})" for tag in available))
+    return "\n".join(lines) + _tui_hint()
+
+
+def _operation_text(data: dict[str, Any], action: str) -> str:
+    results = data.get("results") or []
+    ok = [item for item in results if item.get("ok")]
+    failed = [item for item in results if not item.get("ok")]
+    lines = [f"{action}完成：成功 {len(ok)} 个，失败 {len(failed)} 个。"]
+    for item in ok:
+        lines.append(f"  ✓ {item.get('threadId')}")
+    for item in failed:
+        lines.append(f"  ✗ {item.get('threadId')}：{item.get('error') or '未知错误'}")
+    return "\n".join(lines)
+
+
+def _files_text(data: dict[str, Any], limit: int = 40) -> str:
+    lines = [f"会话 {data.get('threadId')} 的文件线索（来自会话记录，可能不完整）："]
+    for title, key in (("修改文件", "changedFiles"), ("命令引用文件", "referencedFiles")):
+        rows = data.get(key) or []
+        lines.append(f"{title} · {len(rows)}")
+        if not rows:
+            lines.append("  未从会话记录中发现")
+        for row in rows[:limit]:
+            lines.append(f"  {row.get('path')}")
+        if len(rows) > limit:
+            lines.append(f"  …… 另有 {len(rows) - limit} 个未列出")
+    return "\n".join(lines)
+
+
 def _text_result(data: dict[str, Any], summary: str) -> dict[str, Any]:
     return {
         "content": [{"type": "text", "text": summary}],
@@ -1235,7 +1347,7 @@ def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]
             data["locale"] = locale
         if manager_context:
             data["managerContext"] = manager_context
-        return _text_result(data, f"已列出 {data['total']} 个可管理 Codex 会话。")
+        return _text_result(data, _sessions_text(data))
     if name == "list_sessions":
         current_id, manager_context = _current_id_for_call(meta, arguments)
         scope = str(arguments.get("scope") or "all")
@@ -1252,17 +1364,17 @@ def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]
         )
         if manager_context:
             data["managerContext"] = manager_context
-        return _text_result(data, f"已列出 {data['total']} 个可管理 Codex 会话。")
+        return _text_result(data, _sessions_text(data))
     if name == "inspect_session_files":
         thread_id = str(arguments.get("threadId") or "").strip()
         if not thread_id:
             raise ValueError("threadId 不能为空。")
         data = inspect_files(thread_id)
-        return _text_result(data, f"已提取 {len(data['changedFiles'])} 个修改文件和 {len(data['referencedFiles'])} 个引用文件线索。")
+        return _text_result(data, _files_text(data))
     if name == "archive_sessions":
         current_id, _ = _current_id_for_call(meta, arguments, require=True)
         data = archive_sessions(_validate_ids(arguments.get("threadIds")), current_id)
-        return _text_result(data, "归档操作已完成。")
+        return _text_result(data, _operation_text(data, "归档"))
     if name == "delete_sessions":
         current_id, _ = _current_id_for_call(meta, arguments, require=True)
         data = delete_sessions(
@@ -1270,9 +1382,9 @@ def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]
             str(arguments.get("confirmation") or ""),
             current_id,
         )
-        summary = "永久删除操作已完成。"
+        summary = _operation_text(data, "永久删除")
         if not data["sidebarSync"]["ok"]:
-            summary += " 侧边栏同步未完全成功；请刷新或重启 Codex。"
+            summary += "\n侧边栏同步未完全成功；请刷新或重启 Codex。"
         return _text_result(data, summary)
     raise ValueError(f"未知工具：{name}")
 
@@ -1284,6 +1396,7 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
         return None
     try:
         if method == "initialize":
+            _record_host(request.get("params"))
             result = {
                 "protocolVersion": "2025-06-18",
                 "capabilities": {"tools": {"listChanged": False}, "resources": {"subscribe": False, "listChanged": False}},
