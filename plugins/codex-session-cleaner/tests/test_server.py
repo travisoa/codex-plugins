@@ -792,5 +792,126 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertIn("padding-top:6px", html)
 
 
+class ElicitationConfirmTests(unittest.TestCase):
+    """CLI 类宿主上，删除前必须由用户在表单里敲定最终名单。"""
+
+    CLI = {"elicitation": {"form": {}, "url": {}}}
+    DESKTOP = {"ui": {}, "elicitation": {"form": {}}}
+
+    def setUp(self):
+        self.original_app = server.APP
+        self.original_request = server.HOST.request
+        self.original_sync = server.sync_desktop_sidebar
+        self.original_scan = server._scan_history_base_threads
+        server._scan_history_base_threads = lambda: []
+        server.sync_desktop_sidebar = lambda ids, cwd_by_id: {"ok": True, "warnings": []}
+        server._MANAGER_CONTEXTS.clear()
+        server._HOST.clear()
+        self.prompts = []
+
+    def tearDown(self):
+        server.APP = self.original_app
+        server.HOST.request = self.original_request
+        server.sync_desktop_sidebar = self.original_sync
+        server._scan_history_base_threads = self.original_scan
+        server._MANAGER_CONTEXTS.clear()
+        server._HOST.clear()
+
+    def host(self, capabilities, count=3):
+        server.APP = FakeApp(active=[
+            {"id": f"t-{index}", "name": f"会话 {index}", "cwd": f"/tmp/p{index}",
+             "source": "vscode", "updatedAt": 1787411471 - index}
+            for index in range(count)
+        ])
+        server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"capabilities": capabilities,
+                       "clientInfo": {"name": "codex-mcp-client", "title": "Codex"}},
+        })
+
+    def answer(self, response):
+        def fake_request(method, params, timeout=120.0):
+            self.prompts.append((method, params))
+            return response
+        server.HOST.request = fake_request
+
+    def delete(self, ids):
+        return server.call_tool(
+            "delete_sessions",
+            {"threadIds": ids, "confirmation": "删除"},
+            {"threadId": "manager"},
+        )
+
+    def deleted(self, result):
+        return [row["threadId"] for row in result["structuredContent"]["results"] if row["ok"]]
+
+    def test_only_the_boxes_the_user_ticked_are_deleted(self):
+        self.host(self.CLI)
+        self.answer({"action": "accept", "content": {"t-0": True, "t-2": True}})
+        result = self.delete(["t-0", "t-1", "t-2"])
+        self.assertEqual(self.deleted(result), ["t-0", "t-2"])
+        self.assertEqual(result["structuredContent"]["requestedThreadIds"], ["t-0", "t-1", "t-2"])
+        schema = self.prompts[0][1]["requestedSchema"]["properties"]
+        self.assertEqual(list(schema), ["t-0", "t-1", "t-2"])
+        # 危险操作默认不勾选，用户必须主动选 True。
+        self.assertTrue(all(field["default"] is False for field in schema.values()))
+        self.assertIn("会话 0", schema["t-0"]["title"])
+        self.assertIn("/tmp/p0", schema["t-0"]["description"])
+
+    def test_ticking_nothing_deletes_nothing(self):
+        self.host(self.CLI)
+        self.answer({"action": "accept", "content": {}})
+        result = self.delete(["t-0", "t-1"])
+        self.assertTrue(result["structuredContent"]["cancelled"])
+        self.assertEqual(result["structuredContent"]["results"], [])
+        self.assertIn("没有勾选", result["content"][0]["text"])
+
+    def test_declining_the_prompt_deletes_nothing(self):
+        self.host(self.CLI)
+        self.answer({"action": "decline"})
+        result = self.delete(["t-0"])
+        self.assertEqual(result["structuredContent"]["results"], [])
+        self.assertIn("取消", result["content"][0]["text"])
+
+    def test_a_failed_prompt_never_falls_through_to_deleting(self):
+        self.host(self.CLI)
+        def boom(method, params, timeout=120.0):
+            raise server.HostError("宿主连接已关闭。")
+        server.HOST.request = boom
+        result = self.delete(["t-0", "t-1"])
+        self.assertEqual(result["structuredContent"]["results"], [])
+        self.assertIn("已取消删除", result["content"][0]["text"])
+
+    def test_large_batches_switch_to_a_single_confirmation(self):
+        self.host(self.CLI, count=12)
+        self.answer({"action": "accept", "content": {"confirm": "delete_all"}})
+        ids = [f"t-{index}" for index in range(12)]
+        result = self.delete(ids)
+        self.assertEqual(len(self.deleted(result)), 12)
+        schema = self.prompts[0][1]["requestedSchema"]["properties"]
+        self.assertEqual(list(schema), ["confirm"])
+        self.assertEqual(schema["confirm"]["enum"], ["cancel", "delete_all"])
+
+    def test_large_batch_cancel_deletes_nothing(self):
+        self.host(self.CLI, count=12)
+        self.answer({"action": "accept", "content": {"confirm": "cancel"}})
+        result = self.delete([f"t-{index}" for index in range(12)])
+        self.assertEqual(result["structuredContent"]["results"], [])
+
+    def test_hosts_with_a_manager_page_are_not_prompted_again(self):
+        self.host(self.DESKTOP)
+        self.answer({"action": "decline"})
+        result = self.delete(["t-0"])
+        self.assertEqual(self.prompts, [])
+        self.assertEqual(self.deleted(result), ["t-0"])
+
+    def test_hosts_without_elicitation_are_not_prompted(self):
+        self.host({"tools": {}})
+        self.answer({"action": "decline"})
+        result = self.delete(["t-0"])
+        self.assertEqual(self.prompts, [])
+        self.assertEqual(self.deleted(result), ["t-0"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1194,183 +1194,94 @@ def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -
     }
 
 
-# --- 临时诊断：探测宿主的 elicitation 表单能力，确认后删除 -------------------
-PROBE_OPTIONS = [
-    {"value": "thread-a", "label": "会话 A · 修复登录问题", "description": "/tmp/project-a · 2 小时前"},
-    {"value": "thread-b", "label": "会话 B · 临时测试", "description": "/tmp/project-b · 12 天前"},
-    {"value": "thread-c", "label": "会话 C · 数据分析", "description": "/tmp/project-c · 已归档"},
-]
+# 逐字段渲染的宿主上，字段太多会让用户按很多次回车，超过就改用整体确认。
+ELICIT_FIELD_LIMIT = 8
 
 
-def _probe_variants() -> list[tuple[str, dict[str, Any]]]:
-    """MCP 的 elicitation 只支持扁平对象 + 基本类型，因此先试合规写法。"""
-    labels = [option["label"] for option in PROBE_OPTIONS]
-    values = [option["value"] for option in PROBE_OPTIONS]
-    return [
-        (
-            "A. 标准 MCP · 每个会话一个 boolean（规范内的多选写法）",
-            {
-                "message": "【探针 A】请勾选要处理的会话（可多选），然后确认。",
-                "requestedSchema": {
-                    "type": "object",
-                    "properties": {
-                        option["value"]: {
-                            "type": "boolean",
-                            "title": option["label"],
-                            "description": option["description"],
-                            "default": False,
-                        }
-                        for option in PROBE_OPTIONS
-                    },
-                },
-            },
-        ),
-        (
-            "B. 标准 MCP · enum 单选",
-            {
-                "message": "【探针 B】请选择一个会话，然后确认。",
-                "requestedSchema": {
-                    "type": "object",
-                    "properties": {
-                        "session": {
-                            "type": "string",
-                            "title": "会话",
-                            "description": "选择一个会话",
-                            "enum": values,
-                            "enumNames": labels,
-                        }
-                    },
-                    "required": ["session"],
-                },
-            },
-        ),
-        (
-            "C. 标准 MCP · 纯文本输入（最低保底）",
-            {
-                "message": "【探针 C】请输入要处理的会话序号，例如 1,3。",
-                "requestedSchema": {
-                    "type": "object",
-                    "properties": {
-                        "selection": {
-                            "type": "string",
-                            "title": "会话序号",
-                            "description": "; ".join(f"{i}={l}" for i, l in enumerate(labels, 1)),
-                        }
-                    },
-                    "required": ["selection"],
-                },
-            },
-        ),
-        (
-            "D. Codex 扩展 · options + multi_select",
-            {
-                "message": "【探针 D】请勾选要处理的会话，然后确认。",
-                "requestedSchema": {
-                    "variant": "form",
-                    "type": "object",
-                    "properties": {
-                        "sessions": {
-                            "type": "array",
-                            "title": "会话",
-                            "multi_select": True,
-                            "options": PROBE_OPTIONS,
-                        }
-                    },
-                },
-            },
-        ),
-        (
-            "E. 标准 MCP · array + enum（已知会返回空 content，留作对照）",
-            {
-                "message": "【探针 E】请勾选要处理的会话，然后确认。",
-                "requestedSchema": {
-                    "type": "object",
-                    "properties": {
-                        "sessions": {
-                            "type": "array",
-                            "title": "会话",
-                            "items": {"type": "string", "enum": values, "enumNames": labels},
-                        }
-                    },
-                },
-            },
-        ),
-    ]
+def _should_elicit() -> bool:
+    """仅在宿主能弹表单、但渲染不了管理页组件时接管确认（即 Codex CLI）。"""
+    return _host_renders_ui() is False and _host_supports_elicitation()
 
 
-def probe_elicitation() -> dict[str, Any]:
-    """依次尝试各变体。
+def _elicit_target_labels(thread_id: str, item: dict[str, Any]) -> tuple[str, str]:
+    title = str(item.get("title") or "未命名会话")
+    # 删除确认要能分辨同名项目，所以用完整路径而不是目录名。
+    parts = [str(item.get("cwd") or "未知项目路径"), _format_timestamp(item.get("updatedAt"))]
+    if item.get("archived"):
+        parts.append("已归档")
+    if item.get("blockingForkCount"):
+        parts.append(f"{item['blockingForkCount']} 个引用分叉")
+    parts.append(thread_id[:8])
+    return title, " · ".join(parts)
 
-    只有真正收到非空 content 才算成功；accept 但 content 为空说明宿主没能
-    渲染该 schema，应继续试下一个；用户主动 decline/cancel 时立即停止。
+
+def _confirm_delete_targets(
+    ids: list[str], by_id: dict[str, dict[str, Any]]
+) -> tuple[list[str], str | None]:
+    """Let the user pick the final delete list on hosts that render no component.
+
+    Returns (confirmed ids, refusal reason). The reason is set whenever the
+    deletion must not proceed, so a failed or declined prompt never falls
+    through to deleting everything the model proposed.
     """
-    attempts: list[dict[str, Any]] = []
-    accepted: str | None = None
-    stopped_by_user = False
-    for name, params in _probe_variants():
-        record: dict[str, Any] = {"variant": name, "request": params}
-        try:
-            result = HOST.request("elicitation/create", params, timeout=180.0)
-        except HostError as exc:
-            record.update({"outcome": "rejected", "error": str(exc)})
-            attempts.append(record)
-            continue
-        except Exception as exc:
-            record.update({"outcome": "rejected", "error": f"{type(exc).__name__}: {exc}"})
-            attempts.append(record)
-            continue
+    if not _should_elicit():
+        return ids, None
 
-        result = result if isinstance(result, dict) else {}
-        action = str(result.get("action") or "")
-        content = result.get("content")
-        content = content if isinstance(content, dict) else {}
-        record["result"] = result
-        if action == "accept" and content:
-            record["outcome"] = "collected"
-            attempts.append(record)
-            accepted = name
-            break
-        if action == "accept":
-            record["outcome"] = "empty"  # 宿主接受了请求但没渲染出字段
-            attempts.append(record)
-            continue
-        record["outcome"] = "user_stopped"
-        attempts.append(record)
-        stopped_by_user = True
-        break
-    return {
-        "hostClientInfo": _HOST.get("clientInfo"),
-        "hostCapabilities": _HOST.get("capabilities"),
-        "supportsElicitation": _host_supports_elicitation(),
-        "acceptedVariant": accepted,
-        "stoppedByUser": stopped_by_user,
-        "attempts": attempts,
-    }
+    if len(ids) <= ELICIT_FIELD_LIMIT:
+        properties: dict[str, Any] = {}
+        for thread_id in ids:
+            title, detail = _elicit_target_labels(thread_id, by_id.get(thread_id, {}))
+            properties[thread_id] = {
+                "type": "boolean",
+                "title": title,
+                "description": detail,
+                "default": False,
+            }
+        params = {
+            "message": f"即将永久删除以下 {len(ids)} 个会话，请把要删除的选为 True（不可撤销，项目文件不受影响）。",
+            "requestedSchema": {"type": "object", "properties": properties},
+        }
+    else:
+        preview = "；".join(
+            _elicit_target_labels(thread_id, by_id.get(thread_id, {}))[0] for thread_id in ids[:5]
+        )
+        params = {
+            "message": f"即将永久删除 {len(ids)} 个会话，例如：{preview}……",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {
+                    "confirm": {
+                        "type": "string",
+                        "title": f"确认永久删除这 {len(ids)} 个会话？",
+                        "description": "此操作不可撤销；如需逐个挑选，请先缩小选择范围。",
+                        "enum": ["cancel", "delete_all"],
+                        "enumNames": ["取消", f"确认删除全部 {len(ids)} 个"],
+                    }
+                },
+                "required": ["confirm"],
+            },
+        }
 
+    try:
+        result = HOST.request("elicitation/create", params, timeout=120.0)
+    except Exception as exc:
+        return [], f"未能向你确认删除名单（{exc}），已取消删除。"
 
-def _probe_text(data: dict[str, Any]) -> str:
-    marks = {
-        "collected": "✓ 收集到数据",
-        "empty": "△ 接受但未渲染字段",
-        "rejected": "✗ 被拒绝",
-        "user_stopped": "■ 用户取消",
-    }
-    lines = [
-        "=== elicitation 探针结果 ===",
-        f"宿主: {json.dumps(data.get('hostClientInfo'), ensure_ascii=False)}",
-        f"可用变体: {data.get('acceptedVariant') or '（无）'}",
-        f"用户中途取消: {'是' if data.get('stoppedByUser') else '否'}",
-        "",
-    ]
-    for attempt in data.get("attempts") or []:
-        outcome = attempt.get("outcome", "")
-        lines.append(f"--- {attempt['variant']}")
-        lines.append(f"    {marks.get(outcome, outcome)}")
-        if attempt.get("error"):
-            lines.append(f"    错误: {attempt['error']}")
-        if attempt.get("result") is not None:
-            lines.append(f"    宿主返回: {json.dumps(attempt['result'], ensure_ascii=False)}")
-    return "\n".join(lines)
+    result = result if isinstance(result, dict) else {}
+    if str(result.get("action") or "") != "accept":
+        return [], "你已取消删除。"
+    content = result.get("content")
+    content = content if isinstance(content, dict) else {}
+
+    if len(ids) <= ELICIT_FIELD_LIMIT:
+        confirmed = [thread_id for thread_id in ids if content.get(thread_id) is True]
+        if not confirmed:
+            return [], "没有勾选任何会话，已取消删除。"
+        return confirmed, None
+
+    if content.get("confirm") != "delete_all":
+        return [], "你已取消删除。"
+    return ids, None
 
 
 def _tool_definitions() -> list[dict[str, Any]]:
@@ -1383,13 +1294,6 @@ def _tool_definitions() -> list[dict[str, Any]]:
             "inputSchema": {"type": "object", "properties": {}},
             "annotations": {"readOnlyHint": True, "destructiveHint": False},
             "_meta": ui_meta,
-        },
-        {
-            "name": "probe_elicitation",
-            "title": "【临时诊断】探测交互表单能力",
-            "description": "临时诊断工具：依次尝试多种 elicitation 表单格式，用于确认当前客户端支持哪一种。确认后会移除。",
-            "inputSchema": {"type": "object", "properties": {}},
-            "annotations": {"readOnlyHint": True, "destructiveHint": False},
         },
         {
             "name": "list_sessions",
@@ -1586,9 +1490,6 @@ def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]
         if manager_context:
             data["managerContext"] = manager_context
         return _text_result(data, _sessions_text(data))
-    if name == "probe_elicitation":
-        data = probe_elicitation()
-        return _text_result(data, _probe_text(data))
     if name == "list_sessions":
         current_id, manager_context = _current_id_for_call(meta, arguments)
         scope = str(arguments.get("scope") or "all")
@@ -1618,11 +1519,23 @@ def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]
         return _text_result(data, _operation_text(data, "归档"))
     if name == "delete_sessions":
         current_id, _ = _current_id_for_call(meta, arguments, require=True)
+        requested = _validate_ids(arguments.get("threadIds"))
+        confirmed, refusal = _confirm_delete_targets(
+            requested,
+            {item["id"]: item for item in list_sessions(current_id, "all", "")["sessions"]},
+        )
+        if refusal:
+            return _text_result(
+                {"operation": "delete", "results": [], "cancelled": True, "requestedThreadIds": requested},
+                refusal,
+            )
         data = delete_sessions(
-            _validate_ids(arguments.get("threadIds")),
+            confirmed,
             str(arguments.get("confirmation") or ""),
             current_id,
         )
+        if confirmed != requested:
+            data["requestedThreadIds"] = requested
         summary = _operation_text(data, "永久删除")
         if not data["sidebarSync"]["ok"]:
             summary += "\n侧边栏同步未完全成功；请刷新或重启 Codex。"
