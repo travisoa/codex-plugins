@@ -1039,13 +1039,28 @@ class InteractivePickerTests(unittest.TestCase):
         self.assertIn("没有勾选", outcome["note"])
         self.assertIn("第 1/4 页", self.prompts[1]["message"])
 
-    def test_an_unreasonable_result_set_still_asks_for_a_narrower_filter(self):
-        self.host(server.PICK_LIST_LIMIT + 5)
-        self.answers(self.FILTER_OK)
+    def test_a_large_result_set_is_never_refused(self):
+        self.host(163)  # 与真实会话量相当
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "7,101", "page": "done"}},
+            {"action": "accept", "content": {"action": "cancel"}},
+        )
         outcome = self.open()["structuredContent"]["interactive"]
-        self.assertNotIn("selectedThreadIds", outcome)
-        self.assertIn("翻页选择过于繁琐", outcome["note"])
-        self.assertEqual(len(self.prompts), 1)
+        self.assertEqual(outcome["selectedThreadIds"], ["t-6", "t-100"])
+        self.assertIn("第 1/17 页", self.prompts[1]["message"])
+
+    def test_all_selects_every_operable_session_and_skips_protected_ones(self):
+        self.host(5)
+        server.APP.active[2]["id"] = "manager"  # 第 3 项为当前会话
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "all"}},
+            {"action": "accept", "content": {"action": "cancel"}},
+        )
+        outcome = self.open()["structuredContent"]["interactive"]
+        # all 不该因为列表里混有受保护会话而被拒绝。
+        self.assertEqual(outcome["selectedThreadIds"], ["t-0", "t-1", "t-3", "t-4"])
 
     def test_cancelling_the_filter_falls_back_to_the_text_listing(self):
         self.host(3)

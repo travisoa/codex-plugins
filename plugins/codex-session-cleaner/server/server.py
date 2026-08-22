@@ -1198,9 +1198,8 @@ def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -
 ELICIT_FIELD_LIMIT = 8
 # 序号输入只占一个字段，候选分页列出，避免一次塞进过长的提示语。
 PICK_PAGE_SIZE = 10
-PICK_MAX_ROUNDS = 40
-# 分页之后没有硬性上限，只在极端数量下提示先筛选，防止翻页本身变成负担。
-PICK_LIST_LIMIT = 200
+# 只为挡住异常宿主造成的死循环，正常翻页远达不到这个次数。
+PICK_MAX_ROUNDS = 500
 
 
 def _should_elicit() -> bool:
@@ -1359,7 +1358,7 @@ def _parse_selection(raw: Any, sessions: list[dict[str, Any]]) -> list[str]:
     written = str(raw or "").strip()
     if not written:
         return []
-    if written.lower() in ("all", "全部", "*"):
+    if written.lower() in SELECT_ALL_WORDS:
         return [item["id"] for item in sessions]
     picked: list[str] = []
     for chunk in re.split(r"[,，、;；\s]+", written):
@@ -1383,6 +1382,7 @@ def _parse_selection(raw: Any, sessions: list[dict[str, Any]]) -> list[str]:
 
 
 CLEAR_WORDS = {"clear", "reset", "清空", "重选"}
+SELECT_ALL_WORDS = {"all", "全部", "*"}
 
 
 def _pick_row(index: int, item: dict[str, Any], chosen: bool) -> str:
@@ -1479,6 +1479,11 @@ def _elicit_pick(sessions: list[dict[str, Any]]) -> tuple[list[str] | None, str 
                 warning = f"{exc}请重新输入。"
                 continue
             by_id = {item["id"]: item for item in sessions}
+            if written.lower() in SELECT_ALL_WORDS:
+                # “全选”指全选可操作的，不该因为列表里混有受保护会话而报错。
+                picked = [
+                    thread_id for thread_id in picked if by_id[thread_id].get("deletable")
+                ]
             blocked = [
                 index
                 for index, item in enumerate(sessions, start=1)
@@ -1588,12 +1593,6 @@ def _interactive_pick(current_id: str | None, data: dict[str, Any]) -> dict[str,
         return {"data": filtered, "outcome": outcome}
     if not any(item.get("deletable") for item in candidates):
         outcome["note"] = "该筛选条件下的会话都受保护，无法归档或删除。"
-        return {"data": filtered, "outcome": outcome}
-    if len(candidates) > PICK_LIST_LIMIT:
-        outcome["note"] = (
-            f"筛选后仍有 {len(candidates)} 个可操作会话，翻页选择过于繁琐；"
-            "请缩小时间范围或指定标签后重新打开。"
-        )
         return {"data": filtered, "outcome": outcome}
 
     picked, parse_error = _elicit_pick(candidates)
