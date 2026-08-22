@@ -1203,32 +1203,68 @@ PROBE_OPTIONS = [
 
 
 def _probe_variants() -> list[tuple[str, dict[str, Any]]]:
-    """按“最可能正确”到“最试探性”的顺序排列，先报错的不会打扰用户。"""
+    """MCP 的 elicitation 只支持扁平对象 + 基本类型，因此先试合规写法。"""
     labels = [option["label"] for option in PROBE_OPTIONS]
     values = [option["value"] for option in PROBE_OPTIONS]
     return [
         (
-            "A. 标准 MCP · array + enum 多选",
+            "A. 标准 MCP · 每个会话一个 boolean（规范内的多选写法）",
             {
-                "message": "【探针 A】请勾选要处理的会话，然后确认。",
+                "message": "【探针 A】请勾选要处理的会话（可多选），然后确认。",
                 "requestedSchema": {
                     "type": "object",
                     "properties": {
-                        "sessions": {
-                            "type": "array",
-                            "title": "会话",
-                            "description": "可多选",
-                            "items": {"type": "string", "enum": values, "enumNames": labels},
+                        option["value"]: {
+                            "type": "boolean",
+                            "title": option["label"],
+                            "description": option["description"],
+                            "default": False,
                         }
+                        for option in PROBE_OPTIONS
                     },
-                    "required": ["sessions"],
                 },
             },
         ),
         (
-            "B. Codex 扩展 · variant=form + options",
+            "B. 标准 MCP · enum 单选",
             {
-                "message": "【探针 B】请勾选要处理的会话，然后确认。",
+                "message": "【探针 B】请选择一个会话，然后确认。",
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session": {
+                            "type": "string",
+                            "title": "会话",
+                            "description": "选择一个会话",
+                            "enum": values,
+                            "enumNames": labels,
+                        }
+                    },
+                    "required": ["session"],
+                },
+            },
+        ),
+        (
+            "C. 标准 MCP · 纯文本输入（最低保底）",
+            {
+                "message": "【探针 C】请输入要处理的会话序号，例如 1,3。",
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {
+                        "selection": {
+                            "type": "string",
+                            "title": "会话序号",
+                            "description": "; ".join(f"{i}={l}" for i, l in enumerate(labels, 1)),
+                        }
+                    },
+                    "required": ["selection"],
+                },
+            },
+        ),
+        (
+            "D. Codex 扩展 · options + multi_select",
+            {
+                "message": "【探针 D】请勾选要处理的会话，然后确认。",
                 "requestedSchema": {
                     "variant": "form",
                     "type": "object",
@@ -1244,46 +1280,18 @@ def _probe_variants() -> list[tuple[str, dict[str, Any]]]:
             },
         ),
         (
-            "C. Codex 扩展 · 顶层 options + multi_select",
+            "E. 标准 MCP · array + enum（已知会返回空 content，留作对照）",
             {
-                "message": "【探针 C】请勾选要处理的会话，然后确认。",
-                "variant": "form",
-                "multi_select": True,
-                "options": PROBE_OPTIONS,
-            },
-        ),
-        (
-            "D. 标准 MCP · 每个会话一个 boolean",
-            {
-                "message": "【探针 D】请勾选要处理的会话，然后确认。",
+                "message": "【探针 E】请勾选要处理的会话，然后确认。",
                 "requestedSchema": {
                     "type": "object",
                     "properties": {
-                        option["value"]: {
-                            "type": "boolean",
-                            "title": option["label"],
-                            "description": option["description"],
-                        }
-                        for option in PROBE_OPTIONS
-                    },
-                },
-            },
-        ),
-        (
-            "E. 标准 MCP · enum 单选（最低要求）",
-            {
-                "message": "【探针 E】请选择一个会话，然后确认。",
-                "requestedSchema": {
-                    "type": "object",
-                    "properties": {
-                        "session": {
-                            "type": "string",
+                        "sessions": {
+                            "type": "array",
                             "title": "会话",
-                            "enum": values,
-                            "enumNames": labels,
+                            "items": {"type": "string", "enum": values, "enumNames": labels},
                         }
                     },
-                    "required": ["session"],
                 },
             },
         ),
@@ -1291,47 +1299,77 @@ def _probe_variants() -> list[tuple[str, dict[str, Any]]]:
 
 
 def probe_elicitation() -> dict[str, Any]:
+    """依次尝试各变体。
+
+    只有真正收到非空 content 才算成功；accept 但 content 为空说明宿主没能
+    渲染该 schema，应继续试下一个；用户主动 decline/cancel 时立即停止。
+    """
     attempts: list[dict[str, Any]] = []
     accepted: str | None = None
+    stopped_by_user = False
     for name, params in _probe_variants():
         record: dict[str, Any] = {"variant": name, "request": params}
         try:
-            record["result"] = HOST.request("elicitation/create", params, timeout=180.0)
-            record["ok"] = True
+            result = HOST.request("elicitation/create", params, timeout=180.0)
+        except HostError as exc:
+            record.update({"outcome": "rejected", "error": str(exc)})
+            attempts.append(record)
+            continue
+        except Exception as exc:
+            record.update({"outcome": "rejected", "error": f"{type(exc).__name__}: {exc}"})
+            attempts.append(record)
+            continue
+
+        result = result if isinstance(result, dict) else {}
+        action = str(result.get("action") or "")
+        content = result.get("content")
+        content = content if isinstance(content, dict) else {}
+        record["result"] = result
+        if action == "accept" and content:
+            record["outcome"] = "collected"
             attempts.append(record)
             accepted = name
-            break  # 已经弹出并被响应，不再连续打扰用户
-        except HostError as exc:
-            record["ok"] = False
-            record["error"] = str(exc)
+            break
+        if action == "accept":
+            record["outcome"] = "empty"  # 宿主接受了请求但没渲染出字段
             attempts.append(record)
-        except Exception as exc:
-            record["ok"] = False
-            record["error"] = f"{type(exc).__name__}: {exc}"
-            attempts.append(record)
+            continue
+        record["outcome"] = "user_stopped"
+        attempts.append(record)
+        stopped_by_user = True
+        break
     return {
         "hostClientInfo": _HOST.get("clientInfo"),
         "hostCapabilities": _HOST.get("capabilities"),
         "supportsElicitation": _host_supports_elicitation(),
         "acceptedVariant": accepted,
+        "stoppedByUser": stopped_by_user,
         "attempts": attempts,
     }
 
 
 def _probe_text(data: dict[str, Any]) -> str:
+    marks = {
+        "collected": "✓ 收集到数据",
+        "empty": "△ 接受但未渲染字段",
+        "rejected": "✗ 被拒绝",
+        "user_stopped": "■ 用户取消",
+    }
     lines = [
         "=== elicitation 探针结果 ===",
         f"宿主: {json.dumps(data.get('hostClientInfo'), ensure_ascii=False)}",
-        f"能力: {json.dumps(data.get('hostCapabilities'), ensure_ascii=False)}",
-        f"被接受的变体: {data.get('acceptedVariant') or '（全部失败）'}",
+        f"可用变体: {data.get('acceptedVariant') or '（无）'}",
+        f"用户中途取消: {'是' if data.get('stoppedByUser') else '否'}",
         "",
     ]
     for attempt in data.get("attempts") or []:
+        outcome = attempt.get("outcome", "")
         lines.append(f"--- {attempt['variant']}")
-        if attempt.get("ok"):
-            lines.append(f"    成功，宿主返回: {json.dumps(attempt.get('result'), ensure_ascii=False)}")
-        else:
-            lines.append(f"    失败: {attempt.get('error')}")
+        lines.append(f"    {marks.get(outcome, outcome)}")
+        if attempt.get("error"):
+            lines.append(f"    错误: {attempt['error']}")
+        if attempt.get("result") is not None:
+            lines.append(f"    宿主返回: {json.dumps(attempt['result'], ensure_ascii=False)}")
     return "\n".join(lines)
 
 
