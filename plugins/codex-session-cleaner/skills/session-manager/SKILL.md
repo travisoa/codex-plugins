@@ -7,7 +7,7 @@ description: 打开 Codex 会话管理页，查看会话所在项目与文件线
 
 当用户要求查看、整理、归档或删除 Codex 会话时使用本插件。
 
-1. 优先调用 `open_session_manager`，让用户在可视化管理页中选择会话。在 Codex CLI 等支持交互表单的客户端上，该工具会自动弹出筛选与勾选表单；若返回结果包含 `interactive.selectedThreadIds`，只对这些会话执行后续操作，不要自行扩大范围。
+1. 优先调用 `open_session_manager`，让用户在可视化管理页中选择会话。在 Codex CLI 等支持交互表单的客户端上，该工具会自动引导用户完成筛选、选择会话和选定操作；若返回结果包含 `interactive.performed`，说明归档或删除已由用户在表单中确认并执行完毕，只需如实转述结果，不要再调用 `archive_sessions` 或 `delete_sessions` 重复执行。
 2. 用户只想查找项目或文件时，可调用 `list_sessions` 和 `inspect_session_files`。
    `list_sessions` 支持按类别标签筛选，也支持按最后更新时间筛选 1 天内、1 周内、1 个月内、3 个月前、1 个月前、1 周前，或传入自定义开始/结束日期。
 3. 永久删除必须由用户在管理页中选择会话；中文界面输入精确确认词 `删除`，英文界面输入 `delete`。

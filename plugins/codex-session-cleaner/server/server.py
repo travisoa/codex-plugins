@@ -1196,6 +1196,8 @@ def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -
 
 # 逐字段渲染的宿主上，字段太多会让用户按很多次回车，超过就改用整体确认。
 ELICIT_FIELD_LIMIT = 8
+# 序号输入只占一个字段，所以一次能列出的候选比逐字段确认多得多。
+PICK_LIST_LIMIT = 30
 
 
 def _should_elicit() -> bool:
@@ -1349,31 +1351,133 @@ def _elicit_filter(available_tags: list[dict[str, Any]], total: int) -> dict[str
     }
 
 
-def _elicit_pick(sessions: list[dict[str, Any]]) -> list[str] | None:
-    """第二段：逐条勾选。None 表示用户取消。"""
-    properties: dict[str, Any] = {}
-    for item in sessions:
+def _parse_selection(raw: Any, sessions: list[dict[str, Any]]) -> list[str]:
+    """把 '1,3,5-7' / 'all' 这类输入解析成会话 ID，序号非法时报错而不是猜。"""
+    written = str(raw or "").strip()
+    if not written:
+        return []
+    if written.lower() in ("all", "全部", "*"):
+        return [item["id"] for item in sessions]
+    picked: list[str] = []
+    for chunk in re.split(r"[,，、;；\s]+", written):
+        if not chunk:
+            continue
+        span = re.fullmatch(r"(\d+)\s*[-~—]\s*(\d+)", chunk)
+        if span:
+            first, last = int(span.group(1)), int(span.group(2))
+            numbers = range(min(first, last), max(first, last) + 1)
+        elif chunk.isdigit():
+            numbers = range(int(chunk), int(chunk) + 1)
+        else:
+            raise ValueError(f"无法识别的序号“{chunk}”，请输入如 1,3,5-7 的形式。")
+        for number in numbers:
+            if not 1 <= number <= len(sessions):
+                raise ValueError(f"序号 {number} 超出范围 1-{len(sessions)}。")
+            thread_id = sessions[number - 1]["id"]
+            if thread_id not in picked:
+                picked.append(thread_id)
+    return picked
+
+
+def _elicit_pick(sessions: list[dict[str, Any]]) -> tuple[list[str] | None, str | None]:
+    """列出编号清单，用一个输入框收多选结果。返回 (选中 ID, 错误说明)。"""
+    listing = []
+    for index, item in enumerate(sessions, start=1):
         title, detail = _elicit_target_labels(item["id"], item)
-        properties[item["id"]] = {
-            "type": "boolean",
-            "title": title,
-            "description": detail,
-            "default": False,
-        }
+        listing.append(f"{index}. {title} — {detail}")
     params = {
-        "message": f"筛选到 {len(sessions)} 个会话，请把要处理的选为 True（此步只做选择，不会归档或删除）。",
-        "requestedSchema": {"type": "object", "properties": properties},
+        "message": (
+            f"筛选到 {len(sessions)} 个会话：\n"
+            + "\n".join(listing)
+            + "\n\n请输入要处理的序号（此步只做选择，不会归档或删除）。"
+        ),
+        "requestedSchema": {
+            "type": "object",
+            "properties": {
+                "selection": {
+                    "type": "string",
+                    "title": f"要处理的序号（1-{len(sessions)}）",
+                    "description": "多个用逗号分隔，可用区间，例如 1,3,5-7；输入 all 选全部；留空表示不选。",
+                }
+            },
+        },
     }
     try:
         result = HOST.request("elicitation/create", params, timeout=120.0)
     except Exception:
-        return None
+        return None, None
     result = result if isinstance(result, dict) else {}
     if str(result.get("action") or "") != "accept":
-        return None
+        return None, None
     content = result.get("content")
     content = content if isinstance(content, dict) else {}
-    return [item["id"] for item in sessions if content.get(item["id"]) is True]
+    try:
+        return _parse_selection(content.get("selection"), sessions), None
+    except ValueError as exc:
+        return None, str(exc)
+
+
+def _elicit_action(count: int) -> str:
+    """第三段：让用户直接选操作，默认取消。"""
+    params = {
+        "message": f"已选择 {count} 个会话，请选择要执行的操作。",
+        "requestedSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "title": "操作",
+                    "enum": ["cancel", "archive", "delete"],
+                    "enumNames": [
+                        "取消，不做任何操作",
+                        f"归档这 {count} 个会话",
+                        f"永久删除这 {count} 个会话（不可撤销）",
+                    ],
+                    "default": "cancel",
+                }
+            },
+            "required": ["action"],
+        },
+    }
+    try:
+        result = HOST.request("elicitation/create", params, timeout=120.0)
+    except Exception:
+        return "cancel"
+    result = result if isinstance(result, dict) else {}
+    if str(result.get("action") or "") != "accept":
+        return "cancel"
+    content = result.get("content")
+    content = content if isinstance(content, dict) else {}
+    choice = str(content.get("action") or "cancel")
+    return choice if choice in ("cancel", "archive", "delete") else "cancel"
+
+
+def _run_picked_action(
+    action: str, picked: list[str], current_id: str | None, outcome: dict[str, Any]
+) -> None:
+    if action == "cancel":
+        outcome["performed"] = "none"
+        outcome["note"] = f"已选择 {len(picked)} 个会话，但你选择了取消，未做任何改动。"
+        return
+    try:
+        if action == "archive":
+            result = archive_sessions(picked, current_id)
+        else:
+            # 会话与操作都已由用户在表单中敲定，这里不再重复确认。
+            result = delete_sessions(picked, "删除", current_id)
+    except Exception as exc:
+        outcome["performed"] = "failed"
+        outcome["note"] = f"执行失败：{exc}"
+        return
+    outcome["performed"] = action
+    outcome["results"] = result.get("results") or []
+    if action == "delete":
+        outcome["sidebarSync"] = result.get("sidebarSync")
+    failed = [row for row in outcome["results"] if not row.get("ok")]
+    label = "归档" if action == "archive" else "永久删除"
+    outcome["note"] = (
+        f"{label}完成：成功 {len(outcome['results']) - len(failed)} 个，失败 {len(failed)} 个。"
+    )
 
 
 def _interactive_pick(current_id: str | None, data: dict[str, Any]) -> dict[str, Any] | None:
@@ -1393,24 +1497,23 @@ def _interactive_pick(current_id: str | None, data: dict[str, Any]) -> dict[str,
     if not filtered["sessions"]:
         outcome["note"] = "该筛选条件下没有会话，请换个条件重试。"
         return {"data": filtered, "outcome": outcome}
-    if len(candidates) > ELICIT_FIELD_LIMIT:
+    if len(candidates) > PICK_LIST_LIMIT:
         outcome["note"] = (
-            f"筛选后仍有 {len(candidates)} 个可操作会话，超过一次勾选上限 {ELICIT_FIELD_LIMIT} 个；"
+            f"筛选后仍有 {len(candidates)} 个可操作会话，超过单次可列出的 {PICK_LIST_LIMIT} 个；"
             "请缩小时间范围或指定标签后重新打开。"
         )
         return {"data": filtered, "outcome": outcome}
 
-    picked = _elicit_pick(candidates)
-    if picked is None:
+    picked, parse_error = _elicit_pick(candidates)
+    if parse_error:
+        outcome["note"] = f"{parse_error} 请重新打开会话管理页再选一次。"
+    elif picked is None:
         outcome["note"] = "你已取消选择，未做任何改动。"
     elif not picked:
         outcome["note"] = "没有勾选任何会话，未做任何改动。"
     else:
         outcome["selectedThreadIds"] = picked
-        outcome["note"] = (
-            f"用户已勾选 {len(picked)} 个会话。请询问要归档还是永久删除，"
-            "并且只对这些会话执行，不要自行扩大范围。"
-        )
+        _run_picked_action(_elicit_action(len(picked)), picked, current_id, outcome)
     return {"data": filtered, "outcome": outcome}
 
 
@@ -1426,12 +1529,18 @@ def _interactive_text(data: dict[str, Any], outcome: dict[str, Any]) -> str:
     selected = outcome.get("selectedThreadIds") or []
     if selected:
         by_id = {item["id"]: item for item in data.get("sessions") or []}
-        lines.append(f"用户勾选了 {len(selected)} 个会话：")
+        lines.append(f"用户选择了 {len(selected)} 个会话：")
         for index, thread_id in enumerate(selected, start=1):
             item = by_id.get(thread_id, {})
             lines.append(f"  {index}. {item.get('title') or thread_id}")
             lines.append(f"     ID {thread_id} · {item.get('cwd') or ''}")
+    for row in outcome.get("results") or []:
+        mark = "✓" if row.get("ok") else "✗"
+        detail = "" if row.get("ok") else f"：{row.get('error') or '未知错误'}"
+        lines.append(f"  {mark} {row.get('threadId')}{detail}")
     lines.append(outcome.get("note") or "")
+    if outcome.get("performed") in ("archive", "delete", "none"):
+        lines.append("以上操作已由用户在交互界面中直接确认并执行，不要再重复执行或扩大范围。")
     return "\n".join(line for line in lines if line is not None)
 
 
@@ -1441,9 +1550,13 @@ def _tool_definitions() -> list[dict[str, Any]]:
         {
             "name": "open_session_manager",
             "title": "打开 Codex 会话管理页",
-            "description": "列出本地 Codex 会话并打开管理界面。",
+            "description": (
+                "列出本地 Codex 会话并打开管理界面。"
+                "在支持交互表单的命令行客户端上会引导用户筛选、选择会话并选定归档或删除操作，"
+                "该操作由用户在表单中直接确认。"
+            ),
             "inputSchema": {"type": "object", "properties": {}},
-            "annotations": {"readOnlyHint": True, "destructiveHint": False},
+            "annotations": {"readOnlyHint": False, "destructiveHint": True},
             "_meta": ui_meta,
         },
         {

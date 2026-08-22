@@ -806,6 +806,8 @@ class InteractivePickerTests(unittest.TestCase):
         self.original_request = server.HOST.request
         self.original_scan = server._scan_history_base_threads
         server._scan_history_base_threads = lambda: []
+        self.original_sync = server.sync_desktop_sidebar
+        server.sync_desktop_sidebar = lambda ids, cwd_by_id: {"ok": True, "warnings": []}
         server._MANAGER_CONTEXTS.clear()
         server._HOST.clear()
         self.prompts = []
@@ -813,6 +815,7 @@ class InteractivePickerTests(unittest.TestCase):
     def tearDown(self):
         server.APP = self.original_app
         server.HOST.request = self.original_request
+        server.sync_desktop_sidebar = self.original_sync
         server._scan_history_base_threads = self.original_scan
         server._MANAGER_CONTEXTS.clear()
         server._HOST.clear()
@@ -838,30 +841,100 @@ class InteractivePickerTests(unittest.TestCase):
     def open(self):
         return server.call_tool("open_session_manager", {}, {"threadId": "manager"})
 
-    def test_filter_then_pick_returns_the_chosen_sessions(self):
+    FILTER_OK = {"action": "accept", "content": {"scope": "all", "datePreset": "all", "tag": ""}}
+
+    def test_filter_pick_then_act_runs_the_chosen_operation(self):
         self.host(5)
         self.answers(
-            {"action": "accept", "content": {"scope": "all", "datePreset": "all", "tag": ""}},
-            {"action": "accept", "content": {"t-1": True, "t-3": True}},
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "2,4"}},
+            {"action": "accept", "content": {"action": "archive"}},
         )
         result = self.open()
         outcome = result["structuredContent"]["interactive"]
         self.assertEqual(outcome["selectedThreadIds"], ["t-1", "t-3"])
-        self.assertIn("用户勾选了 2 个会话", result["content"][0]["text"])
-        # 第一张表单收筛选条件，第二张逐条勾选。
-        self.assertEqual(
-            list(self.prompts[0]["requestedSchema"]["properties"]),
-            ["scope", "datePreset", "tag"],
+        self.assertEqual(outcome["performed"], "archive")
+        self.assertTrue(all(row["ok"] for row in outcome["results"]))
+        # 三张表单：筛选、序号输入、操作选择。
+        self.assertEqual(list(self.prompts[0]["requestedSchema"]["properties"]),
+                         ["scope", "datePreset", "tag"])
+        self.assertEqual(list(self.prompts[1]["requestedSchema"]["properties"]), ["selection"])
+        self.assertEqual(self.prompts[2]["requestedSchema"]["properties"]["action"]["enum"],
+                         ["cancel", "archive", "delete"])
+
+    def test_the_pick_form_lists_every_candidate_with_a_number(self):
+        self.host(3)
+        self.answers(self.FILTER_OK,
+                     {"action": "accept", "content": {"selection": ""}})
+        self.open()
+        message = self.prompts[1]["message"]
+        for number in (1, 2, 3):
+            self.assertIn(f"{number}. ", message)
+        self.assertIn("会话 0", message)
+        self.assertIn("/tmp/p0", message)
+
+    def test_selection_accepts_ranges_and_all(self):
+        sessions = [{"id": f"t-{index}"} for index in range(6)]
+        self.assertEqual(server._parse_selection("1,3", sessions), ["t-0", "t-2"])
+        self.assertEqual(server._parse_selection("2-4", sessions), ["t-1", "t-2", "t-3"])
+        self.assertEqual(server._parse_selection("4-2", sessions), ["t-1", "t-2", "t-3"])
+        self.assertEqual(server._parse_selection("1, 1 2", sessions), ["t-0", "t-1"])
+        self.assertEqual(len(server._parse_selection("all", sessions)), 6)
+        self.assertEqual(server._parse_selection("", sessions), [])
+
+    def test_out_of_range_or_garbled_input_is_refused_not_guessed(self):
+        sessions = [{"id": f"t-{index}"} for index in range(3)]
+        with self.assertRaisesRegex(ValueError, "超出范围"):
+            server._parse_selection("5", sessions)
+        with self.assertRaisesRegex(ValueError, "无法识别"):
+            server._parse_selection("abc", sessions)
+
+    def test_a_bad_selection_reports_the_error_and_does_nothing(self):
+        self.host(3)
+        self.answers(self.FILTER_OK, {"action": "accept", "content": {"selection": "9"}})
+        outcome = self.open()["structuredContent"]["interactive"]
+        self.assertNotIn("selectedThreadIds", outcome)
+        self.assertIn("超出范围", outcome["note"])
+        self.assertEqual(len(self.prompts), 2)  # 没有走到操作表单
+
+    def test_choosing_cancel_performs_nothing(self):
+        self.host(4)
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "1,2"}},
+            {"action": "accept", "content": {"action": "cancel"}},
         )
-        self.assertTrue(
-            all(field["type"] == "boolean"
-                for field in self.prompts[1]["requestedSchema"]["properties"].values())
+        outcome = self.open()["structuredContent"]["interactive"]
+        self.assertEqual(outcome["selectedThreadIds"], ["t-0", "t-1"])
+        self.assertEqual(outcome["performed"], "none")
+        self.assertNotIn("results", outcome)
+
+    def test_declining_the_action_form_performs_nothing(self):
+        self.host(4)
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "1"}},
+            {"action": "decline"},
         )
+        outcome = self.open()["structuredContent"]["interactive"]
+        self.assertEqual(outcome["performed"], "none")
+
+    def test_delete_through_the_picker_is_not_confirmed_twice(self):
+        self.host(4)
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "1"}},
+            {"action": "accept", "content": {"action": "delete"}},
+        )
+        server.sync_desktop_sidebar = lambda ids, cwd_by_id: {"ok": True, "warnings": []}
+        outcome = self.open()["structuredContent"]["interactive"]
+        self.assertEqual(outcome["performed"], "delete")
+        self.assertEqual([row["threadId"] for row in outcome["results"]], ["t-0"])
+        self.assertEqual(len(self.prompts), 3)  # 筛选 + 选择 + 操作，没有第四张确认表单
 
     def test_filter_form_offers_the_tags_actually_present(self):
         self.host(3)
-        self.answers({"action": "accept", "content": {"scope": "all", "datePreset": "all", "tag": ""}},
-                     {"action": "accept", "content": {}})
+        self.answers(self.FILTER_OK, {"action": "accept", "content": {"selection": ""}})
         self.open()
         tag_field = self.prompts[0]["requestedSchema"]["properties"]["tag"]
         self.assertEqual(tag_field["enum"][0], "")
@@ -869,13 +942,13 @@ class InteractivePickerTests(unittest.TestCase):
         self.assertGreater(len(tag_field["enum"]), 1)
 
     def test_too_many_matches_ask_for_a_narrower_filter_instead_of_prompting(self):
-        self.host(20)
-        self.answers({"action": "accept", "content": {"scope": "all", "datePreset": "all", "tag": ""}})
+        self.host(40)
+        self.answers(self.FILTER_OK)
         result = self.open()
         outcome = result["structuredContent"]["interactive"]
         self.assertNotIn("selectedThreadIds", outcome)
-        self.assertIn("超过一次勾选上限", outcome["note"])
-        self.assertEqual(len(self.prompts), 1)  # 没有弹出无法使用的勾选表单
+        self.assertIn("超过单次可列出的", outcome["note"])
+        self.assertEqual(len(self.prompts), 1)
 
     def test_cancelling_the_filter_falls_back_to_the_text_listing(self):
         self.host(3)
@@ -886,8 +959,7 @@ class InteractivePickerTests(unittest.TestCase):
 
     def test_picking_nothing_changes_nothing(self):
         self.host(3)
-        self.answers({"action": "accept", "content": {"scope": "all", "datePreset": "all", "tag": ""}},
-                     {"action": "accept", "content": {}})
+        self.answers(self.FILTER_OK, {"action": "accept", "content": {"selection": ""}})
         outcome = self.open()["structuredContent"]["interactive"]
         self.assertNotIn("selectedThreadIds", outcome)
         self.assertIn("没有勾选", outcome["note"])
