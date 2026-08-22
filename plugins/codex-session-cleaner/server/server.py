@@ -8,6 +8,7 @@ import calendar
 import json
 import os
 import queue
+import re
 import select
 import shutil
 import socket
@@ -681,11 +682,30 @@ def _tag(key: str) -> dict[str, str]:
     return {"key": key, "label": TAG_LABELS[key]}
 
 
+def _classification_text(value: Any) -> str:
+    text = str(value or "")
+    text = re.sub(r"\[[^\]\n]*\]\(\s*plugin://[^)\s]+\s*\)", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"plugin://[^\s)]+", " ", text, flags=re.IGNORECASE)
+    return " ".join(text.lower().split())
+
+
+def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
+    return any(term in text for term in terms)
+
+
+def _is_plugin_development(text: str) -> bool:
+    plugin = r"(?:plugins?|插件)"
+    action = r"(?:build|create|develop|fix|update|upgrade|debug|publish|maintain|开发|创建|制作|新增|实现|修复|更新|升级|维护|调试|发布|编写|搭建|改造|优化)"
+    return bool(re.search(rf"(?:{action}.{{0,20}}{plugin}|{plugin}.{{0,20}}{action})", text))
+
+
 def _thread_tags(item: dict[str, Any]) -> list[dict[str, str]]:
-    text = " ".join(
-        str(item.get(key) or "")
-        for key in ("title", "preview", "cwd", "projectName", "source")
-    ).lower()
+    content = " ".join(
+        _classification_text(item.get(key)) for key in ("title", "preview")
+    )
+    context = " ".join(
+        _classification_text(item.get(key)) for key in ("cwd", "projectName")
+    )
     tags: list[str] = []
 
     def add(key: str) -> None:
@@ -694,16 +714,30 @@ def _thread_tags(item: dict[str, Any]) -> list[dict[str, str]]:
 
     if item.get("hiddenFromList"):
         add("hidden-fork")
-    categories = (
-        ("session-management", any(term in text for term in ("会话清理器", "session cleaner", "session-manager", "会话管理"))),
-        ("automation", "automation:" in text or "自动化" in text),
-        ("plugin-development", any(term in text for term in ("codex-plugins", "/plugins/", "plugin", "插件"))),
-        ("lark", any(term in text for term in ("飞书", "feishu", "lark", "多维表格"))),
-        ("documents", any(term in text for term in ("excel", "xlsx", "spreadsheet", "表格", "word", "docx", "文档", "pdf", "ppt", "幻灯片"))),
-        ("media", any(term in text for term in ("image", "图片", "图像", "视频", "video", "remotion", "海报", "视觉"))),
-        ("development", bool(item.get("branch")) or any(term in text for term in ("代码", "修复", "开发", "bug", "git", "github", "code"))),
+    content_categories = (
+        ("session-management", _contains_any(content, ("会话清理器", "session cleaner", "session-manager", "会话管理"))),
+        ("automation", "automation:" in content or "自动化" in content),
+        ("plugin-development", _is_plugin_development(content)),
+        ("lark", _contains_any(content, ("飞书", "feishu", "lark", "多维表格"))),
+        ("documents", _contains_any(content, ("excel", "xlsx", "spreadsheet", "表格", "word", "docx", "文档", "pdf", "ppt", "幻灯片"))),
+        ("media", _contains_any(content, ("image", "图片", "图像", "视频", "video", "remotion", "海报", "视觉"))),
     )
-    primary = next((key for key, matched in categories if matched), "general")
+    primary = next((key for key, matched in content_categories if matched), "")
+    if not primary:
+        if _contains_any(context, ("codex-session-cleaner", "session-cleaner")):
+            primary = "session-management"
+        elif _contains_any(context, ("codex-plugins", "/plugins/")) or re.search(
+            r"(?:^|[-_/])plugins?(?:[-_/]|$)", context
+        ):
+            primary = "plugin-development"
+        elif _contains_any(context, ("feishu", "lark")):
+            primary = "lark"
+        elif bool(item.get("branch")) or _contains_any(
+            content, ("代码", "修复", "开发", "bug", "git", "github", "code")
+        ):
+            primary = "development"
+        else:
+            primary = "general"
     add(primary)
     return [_tag(key) for key in tags]
 

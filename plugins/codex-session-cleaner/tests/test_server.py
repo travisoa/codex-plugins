@@ -244,6 +244,44 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in data["sessions"]], ["plugin"])
         self.assertIn("plugin-development", {tag["key"] for tag in data["sessions"][0]["tags"]})
 
+    def test_plugin_invocation_links_do_not_force_plugin_development(self):
+        tags = server._thread_tags({
+            "title": "制作 AI 成果展示视频",
+            "preview": "[@remotion](plugin://remotion@openai-curated-remote) 根据报告制作视频",
+            "cwd": "/tmp/codex-feishu-demo",
+            "projectName": "codex-feishu-demo",
+            "source": "vscode",
+        })
+        self.assertEqual([tag["key"] for tag in tags], ["media"])
+
+    def test_specific_content_beats_project_context(self):
+        tags = server._thread_tags({
+            "title": "制作产品演示视频",
+            "preview": "生成视频并检查画面",
+            "cwd": "/tmp/codex-feishu-demo",
+            "projectName": "codex-feishu-demo",
+            "branch": "main",
+        })
+        self.assertEqual([tag["key"] for tag in tags], ["media"])
+
+    def test_generic_plugin_mentions_are_not_plugin_development(self):
+        tags = server._thread_tags({
+            "title": "推荐可安装插件",
+            "preview": "查看有哪些插件可以使用",
+            "cwd": "/tmp",
+            "source": "plugin://catalog",
+        })
+        self.assertEqual([tag["key"] for tag in tags], ["general"])
+
+    def test_plugin_project_context_remains_plugin_development(self):
+        tags = server._thread_tags({
+            "title": "继续修复相关问题",
+            "cwd": "/tmp/codex-plugins",
+            "projectName": "codex-plugins",
+            "branch": "main",
+        })
+        self.assertEqual([tag["key"] for tag in tags], ["plugin-development"])
+
     def test_custom_date_filter_is_inclusive_for_both_dates(self):
         server.APP = FakeApp(active=[
             {"id": "inside", "name": "Inside", "updatedAt": datetime(2026, 8, 10, 23, 30).timestamp()},
