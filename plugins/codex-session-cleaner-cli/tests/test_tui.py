@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-SERVER_PATH = PLUGIN_ROOT / "server" / "server.py"
+SERVER_PATH = PLUGIN_ROOT / "server" / "core.py"
 TUI_PATH = PLUGIN_ROOT / "tui" / "session_tui.py"
 
 
@@ -21,7 +21,7 @@ def _load(name, path):
 
 
 # 与 session_tui.load_server 用同一个模块名，确保 TUI 复用的是同一份 server 实例。
-server = _load("session_cleaner_server", SERVER_PATH)
+server = _load("session_cleaner_core", SERVER_PATH)
 tui = _load("session_cleaner_tui", TUI_PATH)
 
 

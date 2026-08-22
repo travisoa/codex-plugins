@@ -23,7 +23,7 @@ def _load(name, path):
 
 
 core = _load("core", SERVER_DIR / "core.py")
-
+interactive = _load("interactive", SERVER_DIR / "interactive.py")
 server = _load("session_cleaner_server", SERVER_DIR / "server.py")
 
 
@@ -157,43 +157,6 @@ class SessionCleanerTests(unittest.TestCase):
         data = core.delete_sessions(["old-manager"], "删除", "new-manager")
         self.assertTrue(data["results"][0]["ok"])
         self.assertIn(("thread/delete", {"threadId": "old-manager"}), core.APP.calls)
-
-    def test_manager_context_survives_ui_calls_without_host_metadata(self):
-        core.APP = FakeApp(active=[
-            {"id": "old-manager", "name": "Old manager", "cwd": "/tmp", "source": "vscode"},
-            {"id": "new-manager", "name": "New manager", "cwd": "/tmp", "source": "vscode"},
-        ])
-        opened = server.call_tool(
-            "open_session_manager", {}, {"openai/threadId": "new-manager"}
-        )["structuredContent"]
-        context = opened["managerContext"]
-
-        refreshed = server.call_tool(
-            "list_sessions", {"scope": "all", "managerContext": context}, None
-        )["structuredContent"]
-        self.assertEqual(refreshed["currentThreadId"], "new-manager")
-        self.assertEqual(refreshed["managerContext"], context)
-        old_manager = next(row for row in refreshed["sessions"] if row["id"] == "old-manager")
-        self.assertTrue(old_manager["deletable"])
-
-        deleted = server.call_tool(
-            "delete_sessions",
-            {
-                "threadIds": ["old-manager"],
-                "confirmation": "删除",
-                "managerContext": context,
-            },
-            None,
-        )["structuredContent"]
-        self.assertTrue(deleted["results"][0]["ok"])
-        self.assertIn(("thread/delete", {"threadId": "old-manager"}), core.APP.calls)
-
-    def test_open_manager_passes_host_locale_to_ui(self):
-        core.APP = FakeApp(active=[])
-        opened = server.call_tool(
-            "open_session_manager", {}, {"openai/threadId": "manager", "openai/locale": "en-US"}
-        )["structuredContent"]
-        self.assertEqual(opened["locale"], "en")
 
     def test_invalid_manager_context_is_rejected_before_deletion(self):
         core.APP = FakeApp(active=[{"id": "victim", "name": "Victim", "source": "vscode"}])
@@ -704,8 +667,8 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertIn("共 80 个可管理 Codex 会话", body)
         self.assertIn("另有 50 个会话未列出", body)
 
-    def test_a_host_without_the_component_is_pointed_at_the_cli_edition(self):
-        """这版只服务管理页；渲染不了组件的客户端应被引导去装命令行版。"""
+    def test_the_next_step_is_stated_first_and_as_an_instruction(self):
+        """提示压在上百行列表末尾、写成“可以…”，模型会当成可选建议而停下。"""
         core.APP = FakeApp(active=[
             {"id": f"t-{i}", "name": f"会话 {i}", "cwd": "/tmp", "updatedAt": 100 - i}
             for i in range(40)
@@ -714,15 +677,31 @@ class SessionCleanerTests(unittest.TestCase):
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {"capabilities": {"elicitation": {"form": {}}}},
         })
-        body = server.call_tool("open_session_manager", {}, {"openai/threadId": "m"})["content"][0]["text"]
-        self.assertIn("codex-session-cleaner-cli", body.split("\n")[0])
-        # 本版没有交互工具，绝不能引导模型去调一个并不存在的 select_sessions。
-        self.assertNotIn("select_sessions", body)
-        self.assertNotIn(
-            "select_sessions", json.dumps(server._tool_definitions(), ensure_ascii=False)
-        )
-        # 指引必须在清单之前，别被上百行列表淹没。
-        self.assertLess(body.index("codex-session-cleaner-cli"), body.index("1. ["))
+        # 只读列表不该弹表单，它只负责把“下一步”说清楚。
+        body = server.call_tool("list_sessions", {}, {"openai/threadId": "m"})["content"][0]["text"]
+        head = body.split("\n")[0]
+        self.assertIn("【下一步】", head)
+        self.assertIn("select_sessions", head)
+        self.assertIn("请立即调用", head)
+        self.assertIn("不要在此停下等待", head)
+        # 指令必须在会话清单之前，不能被列表淹没。
+        self.assertLess(body.index("select_sessions"), body.index("1. ["))
+
+    def test_text_fallback_points_at_the_right_affordance(self):
+        core.APP = FakeApp(active=[{"id": "t", "name": "n", "cwd": "/tmp", "updatedAt": 1}])
+
+        def body(capabilities):
+            server.handle({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"capabilities": capabilities},
+            })
+            return server.call_tool("list_sessions", {}, {"threadId": "m"})["content"][0]["text"]
+
+        # 能弹表单的客户端被指向交互工具，否则才建议终端界面。
+        with_elicitation = body({"elicitation": {"form": {}}})
+        self.assertIn("select_sessions", with_elicitation)
+        self.assertNotIn("launch_tui.sh", with_elicitation)
+        self.assertIn("launch_tui.sh", body({"tools": {}}))
 
     def test_operation_text_reports_each_failure(self):
         core._HOST.clear()
@@ -755,100 +734,6 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertIn("/work/project/src/a.py", body)
         self.assertIn("修改文件 · 1", body)
         self.assertIn("未从会话记录中发现", body)
-
-    def test_mcp_resource_is_self_contained_html(self):
-        response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {"uri": server.RESOURCE_URI}})
-        content = response["result"]["contents"][0]
-        self.assertEqual(content["mimeType"], "text/html;profile=mcp-app")
-        self.assertIn("Codex 会话清理器", content["text"])
-        self.assertIn("tools/call", content["text"])
-
-    def test_ui_has_selection_based_clipboard_fallback(self):
-        html = server.UI_PATH.read_text(encoding="utf-8")
-        self.assertIn("function copyTextWithSelection(text)", html)
-        self.assertIn("document.execCommand('copy')", html)
-        self.assertLess(
-            html.index("if (copyTextWithSelection(text))"),
-            html.index("navigator.clipboard?.writeText"),
-        )
-        self.assertIn('value="older_than_3_months"', html)
-        self.assertIn('value="within_1_day"', html)
-        self.assertIn('value="within_1_week"', html)
-        self.assertIn('value="within_1_month"', html)
-        self.assertIn('id="tagFilter"', html)
-        self.assertIn('<option value="">标签</option>', html)
-        self.assertIn('<option value="all">日期</option>', html)
-        self.assertIn("new Option(t().tag, '')", html)
-        self.assertIn('id="customStart"', html)
-        self.assertIn('id="customEnd"', html)
-        self.assertIn("managerContext: ''", html)
-        self.assertIn("{ ...args, managerContext: state.managerContext }", html)
-        self.assertIn("failed[0].error", html)
-
-    def test_ui_localizes_from_host_and_uses_language_specific_delete_confirmation(self):
-        html = server.UI_PATH.read_text(encoding="utf-8")
-        self.assertIn("localeFrom(navigator.language)", html)
-        self.assertIn('id="languageSwitch"', html)
-        self.assertIn('data-locale="zh"', html)
-        self.assertIn('data-locale="en"', html)
-        self.assertIn("localeMode: 'auto'", html)
-        self.assertIn("state.localeMode === 'manual'", html)
-        self.assertIn("setLocale(button.dataset.locale, 'manual')", html)
-        self.assertIn("ui/notifications/host-context-changed", html)
-        self.assertIn("Codex Session Cleaner", html)
-        self.assertIn("confirmation: '删除'", html)
-        self.assertIn("confirmation: 'delete'", html)
-        self.assertIn("confirmation: t().confirmation", html)
-        self.assertIn("event.target.value !== t().confirmation", html)
-        self.assertIn('<button id="cancelDelete" type="button"', html)
-        self.assertIn("$('cancelDelete').addEventListener('click', () => $('deleteDialog').close())", html)
-
-    def test_ui_confines_destructive_actions_to_visible_selection(self):
-        html = server.UI_PATH.read_text(encoding="utf-8")
-        self.assertIn("function visibleSelection(sessions = filteredSessions())", html)
-        self.assertIn("session.deletable", html)
-        self.assertIn(
-            "state.search = event.target.value; state.selected.clear();", html
-        )
-        self.assertIn("state.scope = button.dataset.scope; state.selected.clear();", html)
-        self.assertIn("const targets = visibleSelection();", html)
-        self.assertIn("tool('archive_sessions', { threadIds: targets })", html)
-        self.assertIn(
-            "tool('delete_sessions', { threadIds: targets, confirmation: t().confirmation })", html
-        )
-        self.assertNotIn("threadIds: [...state.selected]", html)
-
-    def test_ui_ignores_messages_from_other_windows(self):
-        html = server.UI_PATH.read_text(encoding="utf-8")
-        self.assertIn("if (event.source !== window.parent) return;", html)
-        self.assertLess(
-            html.index("if (event.source !== window.parent) return;"),
-            html.index("if (!message || message.jsonrpc !== '2.0') return;"),
-        )
-
-    def test_date_filter_options_keep_contrast_in_native_popup(self):
-        html = server.UI_PATH.read_text(encoding="utf-8")
-        self.assertIn(".date-select option", html)
-        self.assertIn("color:#17191d", html)
-        self.assertIn("background:#fff", html)
-
-    def test_selection_actions_use_compact_wide_toolbar(self):
-        html = server.UI_PATH.read_text(encoding="utf-8")
-        toolbar_start = html.index('<section id="toolbar" class="toolbar"')
-        summary = html.index('<div class="summary">')
-        toolbar_end = html.index("</section>", toolbar_start)
-        self.assertLess(toolbar_start, summary)
-        self.assertLess(summary, toolbar_end)
-        self.assertIn(".app { max-width:1340px", html)
-        self.assertIn(".toolbar { position:sticky", html)
-        self.assertIn("grid-template-columns:minmax(220px,1fr) auto 112px 124px auto", html)
-        self.assertIn(".date-select,.tag-select { min-width:0; width:100%", html)
-        self.assertIn(".segments button {", html)
-        self.assertIn("cursor:pointer; white-space:nowrap", html)
-        self.assertIn(".summary { grid-column:1 / -1", html)
-        self.assertIn("padding:8px 9px", html)
-        self.assertIn("padding-top:6px", html)
-
 
 class DeleteToolTests(unittest.TestCase):
     """delete_sessions 不再自行弹表单：确认由管理页或 select_sessions 各自完成。"""
@@ -921,6 +806,552 @@ class DeleteToolTests(unittest.TestCase):
                  "confirmation": "删除"},
                 {"threadId": "manager"},
             )
+
+
+class InteractivePickerTests(unittest.TestCase):
+    """CLI 类宿主上，open_session_manager 走筛选 + 勾选两步交互。"""
+
+    CLI = {"elicitation": {"form": {}, "url": {}}}
+
+    def setUp(self):
+        self.original_app = core.APP
+        self.original_request = core.HOST.request
+        self.original_scan = core._scan_history_base_threads
+        core._scan_history_base_threads = lambda: []
+        self.original_sync = core.sync_desktop_sidebar
+        core.sync_desktop_sidebar = lambda ids, cwd_by_id: {"ok": True, "warnings": []}
+        core._MANAGER_CONTEXTS.clear()
+        core._HOST.clear()
+        self.prompts = []
+
+    def tearDown(self):
+        core.APP = self.original_app
+        core.HOST.request = self.original_request
+        core.sync_desktop_sidebar = self.original_sync
+        core._scan_history_base_threads = self.original_scan
+        core._MANAGER_CONTEXTS.clear()
+        core._HOST.clear()
+
+    def host(self, count, capabilities=None):
+        core.APP = FakeApp(active=[
+            {"id": f"t-{index}", "name": f"会话 {index}", "cwd": f"/tmp/p{index}",
+             "source": "vscode", "updatedAt": 1787411471 - index}
+            for index in range(count)
+        ])
+        server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"capabilities": capabilities or self.CLI},
+        })
+
+    def answers(self, *responses):
+        queue = list(responses)
+        def fake_request(method, params, timeout=120.0):
+            self.prompts.append(params)
+            return queue.pop(0)
+        core.HOST.request = fake_request
+
+    def open(self):
+        return server.call_tool("select_sessions", {}, {"threadId": "manager"})
+
+    FILTER_OK = {"action": "accept", "content": {"scope": "all", "datePreset": "all", "tag": ""}}
+
+    def test_filter_pick_then_act_runs_the_chosen_operation(self):
+        self.host(5)
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "2,4"}},
+            {"action": "accept", "content": {"action": "archive"}},
+        )
+        result = self.open()
+        outcome = result["structuredContent"]["interactive"]
+        self.assertEqual(outcome["selectedThreadIds"], ["t-1", "t-3"])
+        self.assertEqual(outcome["performed"], "archive")
+        self.assertTrue(all(row["ok"] for row in outcome["results"]))
+        # 三张表单：筛选、序号输入、操作选择。
+        self.assertEqual(list(self.prompts[0]["requestedSchema"]["properties"]),
+                         ["scope", "datePreset", "tag"])
+        self.assertEqual(list(self.prompts[1]["requestedSchema"]["properties"]), ["selection"])
+        self.assertEqual(self.prompts[2]["requestedSchema"]["properties"]["action"]["enum"],
+                         ["cancel", "archive", "delete"])
+
+    def test_the_pick_form_lists_every_candidate_with_a_number(self):
+        self.host(3)
+        self.answers(self.FILTER_OK,
+                     {"action": "accept", "content": {"selection": ""}})
+        self.open()
+        message = self.prompts[1]["message"]
+        for number in (1, 2, 3):
+            self.assertIn(f"{number}. ", message)
+        self.assertIn("会话 0", message)
+        self.assertIn("/tmp/p0", message)
+
+    def test_selection_accepts_ranges_and_all(self):
+        sessions = [{"id": f"t-{index}"} for index in range(6)]
+        self.assertEqual(interactive._parse_selection("1,3", sessions), ["t-0", "t-2"])
+        self.assertEqual(interactive._parse_selection("2-4", sessions), ["t-1", "t-2", "t-3"])
+        self.assertEqual(interactive._parse_selection("4-2", sessions), ["t-1", "t-2", "t-3"])
+        self.assertEqual(interactive._parse_selection("1, 1 2", sessions), ["t-0", "t-1"])
+        self.assertEqual(len(interactive._parse_selection("all", sessions)), 6)
+        self.assertEqual(interactive._parse_selection("", sessions), [])
+
+    def test_out_of_range_or_garbled_input_is_refused_not_guessed(self):
+        sessions = [{"id": f"t-{index}"} for index in range(3)]
+        with self.assertRaisesRegex(ValueError, "超出范围"):
+            interactive._parse_selection("5", sessions)
+        with self.assertRaisesRegex(ValueError, "无法识别"):
+            interactive._parse_selection("abc", sessions)
+
+    def test_a_bad_selection_reprompts_instead_of_starting_over(self):
+        self.host(3)
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "9"}},
+            {"action": "accept", "content": {"selection": "2"}},
+            {"action": "accept", "content": {"action": "cancel"}},
+        )
+        outcome = self.open()["structuredContent"]["interactive"]
+        self.assertEqual(outcome["selectedThreadIds"], ["t-1"])
+        # 出错后在同一张表单里重来，并把原因显示出来。
+        self.assertIn("超出范围", self.prompts[2]["message"])
+        self.assertIn("请重新输入", self.prompts[2]["message"])
+
+    def test_paging_is_chosen_from_options_and_accumulates_selection(self):
+        self.host(25)
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "3"}},
+            {"action": "accept", "content": {"page": "next"}},
+            {"action": "accept", "content": {"selection": "15"}},
+            {"action": "accept", "content": {"page": "done"}},
+            {"action": "accept", "content": {"action": "cancel"}},
+        )
+        outcome = self.open()["structuredContent"]["interactive"]
+        # 每页选的都累加下来，不用最后一次性重输。
+        self.assertEqual(outcome["selectedThreadIds"], ["t-2", "t-14"])
+        # 每张表单只问一件事，避免选完“完成选择”又被追问序号。
+        for form in self.prompts[1:5]:
+            self.assertEqual(len(form["requestedSchema"]["properties"]), 1)
+        page_field = self.prompts[2]["requestedSchema"]["properties"]["page"]
+        self.assertEqual(page_field["enum"], ["done", "next", "prev"])
+        self.assertEqual(page_field["enumNames"], ["完成选择", "下一页", "上一页"])
+        self.assertEqual(page_field["default"], "done")
+        self.assertIn("第 1/3 页", self.prompts[1]["message"])
+        self.assertIn("第 2/3 页", self.prompts[3]["message"])
+        self.assertIn("已选 1 个：3", self.prompts[3]["message"])
+
+    def test_already_chosen_rows_are_ticked_and_clear_resets_them(self):
+        self.host(15)  # 多页时才有“完成选择”一步，可以边看边加
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "2"}},
+            {"action": "accept", "content": {"page": "next"}},
+            {"action": "accept", "content": {"selection": "clear"}},
+            {"action": "accept", "content": {"page": "prev"}},
+            {"action": "accept", "content": {"selection": ""}},
+            {"action": "accept", "content": {"page": "done"}},
+        )
+        self.open()
+        self.assertIn("已选 1 个：2", self.prompts[3]["message"])
+        # clear 之后回到未选状态。
+        self.assertIn("2. · ", self.prompts[5]["message"])
+        self.assertNotIn("已选", self.prompts[5]["message"])
+
+    def test_a_single_page_submits_straight_away(self):
+        self.host(4)
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "1,3"}},
+            {"action": "accept", "content": {"action": "cancel"}},
+        )
+        outcome = self.open()["structuredContent"]["interactive"]
+        self.assertEqual(outcome["selectedThreadIds"], ["t-0", "t-2"])
+        self.assertEqual(len(self.prompts), 3)  # 筛选 + 一次选择 + 操作
+
+    def test_the_current_session_is_listed_but_refused(self):
+        self.host(4)
+        core.APP.active[1]["id"] = "manager"  # 让第 2 项成为当前会话
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "2"}},
+            {"action": "accept", "content": {"selection": ""}},
+        )
+        self.open()
+        listing = self.prompts[1]["message"]
+        self.assertIn("⊘", listing)
+        self.assertIn("当前会话，受保护", listing)
+        # 选中受保护项要被挡下并说明原因，而不是静默跳过。
+        self.assertIn("不能操作", self.prompts[2]["message"])
+
+    def test_paging_past_the_last_page_says_so(self):
+        self.host(15)
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": ""}},
+            {"action": "accept", "content": {"page": "next"}},
+            {"action": "accept", "content": {"selection": ""}},
+            {"action": "accept", "content": {"page": "next"}},
+            {"action": "accept", "content": {"selection": ""}},
+            {"action": "accept", "content": {"page": "done"}},
+        )
+        self.open()
+        self.assertIn("已经是最后一页", self.prompts[5]["message"])
+
+    def test_a_single_page_listing_shows_no_paging_hints(self):
+        self.host(4)
+        self.answers(self.FILTER_OK, {"action": "accept", "content": {"selection": ""}})
+        self.open()
+        message = self.prompts[1]["message"]
+        self.assertNotIn("页", message)
+        self.assertNotIn("page", self.prompts[1]["requestedSchema"]["properties"])
+
+    def test_choosing_cancel_performs_nothing(self):
+        self.host(4)
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "1,2"}},
+            {"action": "accept", "content": {"action": "cancel"}},
+        )
+        outcome = self.open()["structuredContent"]["interactive"]
+        self.assertEqual(outcome["selectedThreadIds"], ["t-0", "t-1"])
+        self.assertEqual(outcome["performed"], "none")
+        self.assertNotIn("results", outcome)
+
+    def test_declining_the_action_form_performs_nothing(self):
+        self.host(4)
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "1"}},
+            {"action": "decline"},
+        )
+        outcome = self.open()["structuredContent"]["interactive"]
+        self.assertEqual(outcome["performed"], "none")
+
+    def test_delete_through_the_picker_is_not_confirmed_twice(self):
+        self.host(4)
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "1"}},
+            {"action": "accept", "content": {"action": "delete"}},
+        )
+        core.sync_desktop_sidebar = lambda ids, cwd_by_id: {"ok": True, "warnings": []}
+        outcome = self.open()["structuredContent"]["interactive"]
+        self.assertEqual(outcome["performed"], "delete")
+        self.assertEqual([row["threadId"] for row in outcome["results"]], ["t-0"])
+        self.assertEqual(len(self.prompts), 3)  # 筛选 + 选择 + 操作，没有第四张确认表单
+
+    def test_filter_form_offers_the_tags_actually_present(self):
+        self.host(3)
+        self.answers(self.FILTER_OK, {"action": "accept", "content": {"selection": ""}})
+        self.open()
+        tag_field = self.prompts[0]["requestedSchema"]["properties"]["tag"]
+        self.assertEqual(tag_field["enum"][0], "")
+        self.assertEqual(tag_field["enumNames"][0], "不限")
+        self.assertGreater(len(tag_field["enum"]), 1)
+
+    def test_a_moderate_result_set_is_paged_rather_than_refused(self):
+        self.host(40)
+        self.answers(self.FILTER_OK,
+                     {"action": "accept", "content": {"selection": ""}},
+                     {"action": "accept", "content": {"page": "done"}})
+        outcome = self.open()["structuredContent"]["interactive"]
+        self.assertIn("没有勾选", outcome["note"])
+        self.assertIn("第 1/4 页", self.prompts[1]["message"])
+
+    def test_a_large_result_set_is_never_refused(self):
+        self.host(163)  # 与真实会话量相当
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "7,101"}},
+            {"action": "accept", "content": {"page": "done"}},
+            {"action": "accept", "content": {"action": "cancel"}},
+        )
+        outcome = self.open()["structuredContent"]["interactive"]
+        self.assertEqual(outcome["selectedThreadIds"], ["t-6", "t-100"])
+        self.assertIn("第 1/17 页", self.prompts[1]["message"])
+
+    def test_all_selects_every_operable_session_and_skips_protected_ones(self):
+        self.host(5)
+        core.APP.active[2]["id"] = "manager"  # 第 3 项为当前会话
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "all"}},
+            {"action": "accept", "content": {"action": "cancel"}},
+        )
+        outcome = self.open()["structuredContent"]["interactive"]
+        # all 不该因为列表里混有受保护会话而被拒绝。
+        self.assertEqual(outcome["selectedThreadIds"], ["t-0", "t-1", "t-3", "t-4"])
+
+    def test_cancelling_the_filter_reports_no_change(self):
+        self.host(3)
+        self.answers({"action": "decline"})
+        outcome = self.open()["structuredContent"]["interactive"]
+        self.assertNotIn("selectedThreadIds", outcome)
+        self.assertIn("取消", outcome["note"])
+
+    def test_picking_nothing_changes_nothing(self):
+        self.host(3)
+        self.answers(self.FILTER_OK, {"action": "accept", "content": {"selection": ""}})
+        outcome = self.open()["structuredContent"]["interactive"]
+        self.assertNotIn("selectedThreadIds", outcome)
+        self.assertIn("没有勾选", outcome["note"])
+
+    def test_the_listing_matches_what_the_manager_page_would_show(self):
+        """两条路径共用 list_sessions，派生会话同样不单独出现，判断依据也要齐。"""
+        core.APP = FakeApp(active=[
+            {"id": "root-1", "name": "顶层会话", "cwd": "/tmp/a", "updatedAt": 90},
+            {"id": "sub-1", "name": "子代理审查", "cwd": "/tmp/a",
+             "parentThreadId": "root-1", "updatedAt": 80},
+            {"id": "sub-2", "name": "子代理压缩", "cwd": "/tmp/a",
+             "source": {"subAgent": {"threadSpawn": {"parentThreadId": "root-1"}}}, "updatedAt": 70},
+            {"id": "root-2", "name": "另一个顶层", "cwd": "/tmp/b", "updatedAt": 60},
+            {"id": "temp-1", "name": "临时问答", "cwd": "/tmp/a",
+             "ephemeral": True, "updatedAt": 50},
+        ])
+        core._scan_history_base_threads = lambda: [{
+            "id": "fork-1", "name": "隐藏分叉", "cwd": "/tmp/b", "archived": False,
+            "historyBaseThreadId": "root-2", "hiddenFromList": True, "updatedAt": 55,
+        }]
+        server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"capabilities": self.CLI},
+        })
+        self.answers(self.FILTER_OK, {"action": "accept", "content": {"selection": ""}})
+        server.call_tool("select_sessions", {}, {"threadId": "root-1"})
+        listing = self.prompts[1]["message"]
+
+        # 子代理会话不单独出现，和管理页一致。
+        self.assertNotIn("子代理审查", listing)
+        self.assertNotIn("子代理压缩", listing)
+        # 但它们的存在要通过派生数量体现出来，否则看不出删除的影响面。
+        self.assertIn("连带 2 个派生会话", listing)
+        # 管理页会高亮的这几类状态，命令行同样要标出来。
+        self.assertIn("隐藏分叉", listing)
+        self.assertIn("被 1 个分叉引用", listing)
+        self.assertIn("（临时会话，不可操作）", listing)
+        self.assertIn("（当前会话，受保护）", listing)
+
+    def test_select_sessions_refuses_hosts_without_elicitation(self):
+        self.host(3, capabilities={"tools": {}})
+        with self.assertRaisesRegex(ValueError, "不支持交互表单"):
+            server.call_tool("select_sessions", {}, {"threadId": "manager"})
+
+    def test_default_filter_reuses_the_listing_already_fetched(self):
+        self.host(6)
+        calls = []
+        original = core.list_sessions
+        def counted(*args, **kwargs):
+            calls.append(args[1:4])
+            return original(*args, **kwargs)
+        core.list_sessions = counted
+        try:
+            self.answers(self.FILTER_OK,
+                         {"action": "accept", "content": {"selection": ""}})
+            self.open()
+        finally:
+            core.list_sessions = original
+        # 条件仍是默认值时不该再拉一次全量列表。
+        self.assertEqual(len(calls), 1)
+
+    def test_a_narrowed_filter_does_refetch(self):
+        self.host(6)
+        calls = []
+        original = core.list_sessions
+        def counted(*args, **kwargs):
+            calls.append(args[1:4])
+            return original(*args, **kwargs)
+        core.list_sessions = counted
+        try:
+            self.answers(
+                {"action": "accept",
+                 "content": {"scope": "archived", "datePreset": "all", "tag": ""}},
+                {"action": "accept", "content": {"selection": ""}},
+            )
+            self.open()
+        finally:
+            core.list_sessions = original
+        self.assertEqual(len(calls), 2)
+
+    def test_an_oversized_batch_is_refused_like_the_tool_path(self):
+        self.host(core.BATCH_LIMIT + 20)
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "all"}},
+            {"action": "accept", "content": {"page": "done"}},
+            {"action": "accept", "content": {"action": "delete"}},
+        )
+        outcome = self.open()["structuredContent"]["interactive"]
+        self.assertEqual(outcome["performed"], "none")
+        self.assertIn(f"一次最多处理 {core.BATCH_LIMIT} 个会话", outcome["note"])
+
+
+class ElicitationLocaleTests(unittest.TestCase):
+    """表单直接呈现给用户，不经模型转述，必须跟随宿主语言。"""
+
+    def setUp(self):
+        self.original_app = core.APP
+        self.original_request = core.HOST.request
+        self.original_scan = core._scan_history_base_threads
+        core._scan_history_base_threads = lambda: []
+        core._HOST.clear()
+        core._MANAGER_CONTEXTS.clear()
+        core.APP = FakeApp(active=[
+            {"id": f"t-{i}", "name": f"Session {i}", "cwd": "/tmp/demo",
+             "source": "vscode", "updatedAt": 100 - i}
+            for i in range(3)
+        ])
+        server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"capabilities": {"elicitation": {"form": {}}}},
+        })
+        self.prompts = []
+
+    def tearDown(self):
+        core.APP = self.original_app
+        core.HOST.request = self.original_request
+        core._scan_history_base_threads = self.original_scan
+        core._HOST.clear()
+        core._MANAGER_CONTEXTS.clear()
+
+    def run_flow(self, meta):
+        queue = [
+            {"action": "accept", "content": {"scope": "all", "datePreset": "all", "tag": ""}},
+            {"action": "accept", "content": {"selection": "1"}},
+            {"action": "accept", "content": {"action": "cancel"}},
+        ]
+        def fake(method, params, timeout=120.0):
+            self.prompts.append(params)
+            return queue[len(self.prompts) - 1]
+        core.HOST.request = fake
+        server.call_tool("select_sessions", {}, meta)
+
+    def test_an_english_host_gets_english_forms(self):
+        self.run_flow({"openai/threadId": "mgr", "openai/locale": "en-US"})
+        filter_form, pick_form, action_form = self.prompts
+        self.assertIn("Choose filters first", filter_form["message"])
+        self.assertEqual(
+            filter_form["requestedSchema"]["properties"]["scope"]["enumNames"],
+            ["All", "Current", "Archived"],
+        )
+        self.assertEqual(
+            filter_form["requestedSchema"]["properties"]["tag"]["enumNames"][0], "Any"
+        )
+        self.assertIn("sessions matched", pick_form["message"])
+        self.assertIn(
+            "Permanently delete",
+            " ".join(action_form["requestedSchema"]["properties"]["action"]["enumNames"]),
+        )
+        # 英文界面里不该混入中文标点或词句。
+        for form in self.prompts:
+            self.assertNotIn("：", json.dumps(form, ensure_ascii=False))
+            self.assertNotIn("会话", json.dumps(form, ensure_ascii=False))
+
+    def test_a_chinese_host_gets_chinese_forms(self):
+        self.run_flow({"openai/threadId": "mgr", "openai/locale": "zh-CN"})
+        self.assertIn("请先选择筛选条件", self.prompts[0]["message"])
+        self.assertEqual(
+            self.prompts[0]["requestedSchema"]["properties"]["scope"]["enumNames"],
+            ["全部", "当前", "已归档"],
+        )
+
+    def test_category_tags_are_localised_too(self):
+        core._HOST["locale"] = "en"
+        self.assertEqual(interactive._tag_label("plugin-development"), "Plugin development")
+        core._HOST["locale"] = "zh"
+        self.assertEqual(interactive._tag_label("plugin-development"), "插件开发")
+
+    def test_selection_errors_follow_the_host_language(self):
+        sessions = [{"id": "t-0"}]
+        core._HOST["locale"] = "en"
+        with self.assertRaisesRegex(ValueError, "outside 1-1"):
+            interactive._parse_selection("9", sessions)
+        core._HOST["locale"] = "zh"
+        with self.assertRaisesRegex(ValueError, "超出范围"):
+            interactive._parse_selection("9", sessions)
+
+
+class ElicitationFailureTests(unittest.TestCase):
+    """表单送不出去是故障，不能报成“用户取消了”。"""
+
+    def setUp(self):
+        self.original_app = core.APP
+        self.original_request = core.HOST.request
+        self.original_scan = core._scan_history_base_threads
+        core._scan_history_base_threads = lambda: []
+        core._HOST.clear()
+        core._MANAGER_CONTEXTS.clear()
+        core.APP = FakeApp(active=[
+            {"id": f"t-{i}", "name": f"会话 {i}", "cwd": "/tmp/p", "source": "vscode",
+             "updatedAt": 100 - i}
+            for i in range(3)
+        ])
+        server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"capabilities": {"elicitation": {"form": {}}}},
+        })
+
+    def tearDown(self):
+        core.APP = self.original_app
+        core.HOST.request = self.original_request
+        core._scan_history_base_threads = self.original_scan
+        core._HOST.clear()
+        core._MANAGER_CONTEXTS.clear()
+
+    def answers(self, *responses):
+        queue = list(responses)
+        def fake(method, params, timeout=120.0):
+            item = queue.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+        core.HOST.request = fake
+
+    def open(self):
+        return server.call_tool("select_sessions", {}, {"threadId": "manager"})
+
+    FILTER_OK = {"action": "accept", "content": {"scope": "all", "datePreset": "all", "tag": ""}}
+
+    def test_a_timed_out_filter_form_is_not_reported_as_cancelled(self):
+        self.answers(core.HostError("等待宿主响应 elicitation/create 超时。"))
+        note = self.open()["structuredContent"]["interactive"]["note"]
+        self.assertIn("未能显示筛选表单", note)
+        self.assertIn("超时", note)
+        self.assertNotIn("你已取消", note)
+
+    def test_a_declined_filter_form_still_reads_as_cancelled(self):
+        self.answers({"action": "decline"})
+        note = self.open()["structuredContent"]["interactive"]["note"]
+        self.assertIn("你已取消", note)
+        self.assertNotIn("未能显示", note)
+
+    def test_a_failed_pick_form_is_not_reported_as_cancelled(self):
+        self.answers(self.FILTER_OK, core.HostError("宿主连接已关闭。"))
+        note = self.open()["structuredContent"]["interactive"]["note"]
+        self.assertIn("未能完成选择", note)
+        self.assertNotIn("取消", note)
+
+    def test_a_failed_action_form_does_not_claim_the_user_cancelled(self):
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "1"}},
+            core.HostError("等待宿主响应 elicitation/create 超时。"),
+        )
+        outcome = self.open()["structuredContent"]["interactive"]
+        # 会话确实选好了，不能说成用户选了取消。
+        self.assertEqual(outcome["selectedThreadIds"], ["t-0"])
+        self.assertEqual(outcome["performed"], "none")
+        self.assertIn("未能显示操作表单", outcome["note"])
+        self.assertNotIn("你选择了取消", outcome["note"])
+
+    def test_a_genuinely_cancelled_action_still_says_so(self):
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "1"}},
+            {"action": "accept", "content": {"action": "cancel"}},
+        )
+        outcome = self.open()["structuredContent"]["interactive"]
+        self.assertEqual(outcome["performed"], "none")
+        self.assertIn("取消", outcome["note"])
+        self.assertNotIn("未能显示", outcome["note"])
 
 if __name__ == "__main__":
     unittest.main()

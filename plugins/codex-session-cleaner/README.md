@@ -1,8 +1,11 @@
 # Codex 会话清理器
 
-本地 Codex 会话管理插件。通过 MCP Apps 管理页、终端界面（TUI）和 Codex `app-server` 集中查看当前及已归档会话，按状态、类别标签和日期筛选，核对项目与文件线索，并安全地批量归档或永久删除会话。
+面向 **ChatGPT 桌面端 Codex** 的本地会话管理插件。通过 MCP Apps 管理页和 Codex `app-server` 集中查看当前及已归档会话，按状态、类别标签和日期筛选，核对项目与文件线索，并安全地批量归档或永久删除会话。
 
 ![Codex 会话清理器管理页](assets/screenshots/session-manager-overview.png)
+
+> 使用 Codex CLI 的用户请改装 [`codex-session-cleaner-cli`](../codex-session-cleaner-cli/README.md)，
+> 那一版通过交互表单和终端界面操作。两版共用同一份核心逻辑，但工具面互不重叠。
 
 ## 功能
 
@@ -17,16 +20,15 @@
 - 中文界面输入确认词 `删除`（英文界面输入 `delete`）后，批量删除所选会话及其派生会话；同批选择存在历史引用关系的分叉和源会话时，插件会先删除分叉；
 - 管理页根据 Codex Host 语言自动显示中文或英文，Host 未提供语言时回退到浏览器语言；也可使用标题栏中“当前管理会话受保护”旁的“中文 / EN”按钮手动切换，手动选择在当前页面内优先；
 - 归档和删除成功后都会通知 Codex 桌面侧边栏刷新：归档只广播状态变化，删除还会清理桌面本地目录项，避免保留无法打开的历史条目；
-- `open_session_manager` 始终只列出会话并返回管理页组件，不会自行弹出表单；在渲染不了管理页但支持交互表单的客户端（如 Codex CLI）上，可调用 `select_sessions` 进入三步交互：筛选（范围 / 最后更新时间 / 类别标签）→ 从编号列表中输入序号多选 → 选择归档、永久删除或取消，全部在表单中完成；
+- `open_session_manager` 始终只列出会话并返回管理页组件，本版不含任何交互表单工具，因此不会在管理页可用时弹出终端选择器；
 - 根据 MCP `initialize` 握手判断客户端能否渲染组件：支持时返回可视化管理页，不支持时返回同等信息的文本会话列表（含会话 ID、项目、标签、状态与阻塞分叉），并提示可改用终端界面；
 - 禁止删除当前管理会话和临时会话；
-- 提供纯终端界面（TUI），在 Codex CLI 环境下用键盘完成同样的浏览、筛选、文件线索查看、归档与删除，并复用与管理页完全相同的后端安全规则。
 
 ## 运行要求
 
 - Codex CLI，且终端可执行 `codex`；
 - Python 3；
-- ChatGPT 桌面端 Codex，用于显示可视化管理页；终端界面（TUI）不需要桌面端，只需支持 curses 的终端。
+- ChatGPT 桌面端 Codex，用于显示可视化管理页。
 
 服务器仅使用 Python 标准库。Codex 插件支持从 ChatGPT 桌面端或 Codex CLI 安装，IDE 扩展暂不支持插件。参见 [OpenAI 插件文档](https://learn.chatgpt.com/docs/plugins)。
 
@@ -90,46 +92,6 @@ codex plugin list
 
 ![Codex 会话清理器永久删除确认](assets/screenshots/session-manager-delete-confirmation.png)
 
-### 在终端中使用（TUI）
-
-不打开桌面端时，可直接运行插件自带的终端界面：
-
-```bash
-./scripts/launch_tui.sh
-```
-
-从 marketplace 安装后，脚本位于插件安装目录下，例如：
-
-```bash
-~/.codex/plugins/cache/codex-plugins/codex-session-cleaner/*/scripts/launch_tui.sh
-```
-
-界面语言默认跟随 `LANG` 等环境变量，可用 `--lang zh` 或 `--lang en` 指定。
-
-按键：
-
-| 按键 | 作用 |
-| --- | --- |
-| `↑` `↓` / `k` `j` | 移动光标，`PgUp` `PgDn` 翻页 |
-| `空格` | 勾选或取消当前会话；受保护的会话不可勾选 |
-| `/` | 搜索标题、ID、标签或项目路径 |
-| `F` | 打开筛选面板，调整状态范围、类别标签和最后更新时间 |
-| `I` | 查看当前会话的修改文件与命令引用文件线索 |
-| `A` | 归档所选会话 |
-| `D` | 永久删除所选会话，需输入确认词 |
-| `R` | 刷新 |
-| `Q` | 退出 |
-
-终端界面直接复用 `server.py` 的列表、归档与删除实现，因此当前会话保护、临时会话保护、确认词校验、隐藏分叉阻塞和桌面侧边栏同步的行为与管理页完全一致。
-
-通过 MCP 工具调用插件时（无论在 Codex CLI 还是桌面端），Codex 都会在调用元数据中提供当前会话 ID，当前会话保护始终生效。而独立运行本脚本时，进程本身不属于任何 Codex 会话，默认没有“当前会话”可保护，此时列表中的顶层会话均可删除，界面右上角会显示“CLI 模式 · 未绑定当前会话”。若终端中另有正在运行的 Codex 会话需要保护，用 `--current` 显式指定：
-
-```bash
-./scripts/launch_tui.sh --current <thread-id>
-```
-
-指定后该会话在界面中标记为“当前”，且无法被勾选、归档或删除。
-
 ### 删除启动会话管理页的任务
 
 若删除用于启动会话管理页的任务失败，先在 Codex 侧边栏将该任务归档；随后新建或切换到另一个任务，重新打开会话管理页，在“已归档”或“全部”中选择原任务并执行永久删除。不要在原任务打开的管理页中删除该任务自身。
@@ -145,54 +107,14 @@ codex plugin list
 | 工具 | 用途 |
 | --- | --- |
 | `open_session_manager` | 读取会话并打开可视化管理页 |
-| `select_sessions` | 在支持交互表单的命令行客户端中引导用户筛选、选择并归档或删除会话 |
 | `list_sessions` | 按状态、搜索词、类别标签和最后更新时间列出会话，并补充隐藏分叉 |
 | `inspect_session_files` | 提取指定会话的修改文件和命令引用文件线索 |
 | `archive_sessions` | 批量归档所选顶层会话 |
 | `delete_sessions` | 在确认词与当前会话保护校验通过后永久删除会话 |
 
-终端界面不是 MCP 工具，由用户在终端中直接运行，不经过模型调用。
-
-在不能渲染 MCP Apps 组件的客户端（例如 Codex CLI）中，`open_session_manager` 和 `list_sessions` 会返回
-结构化的文本会话列表而不是管理页，`inspect_session_files`、`archive_sessions` 和 `delete_sessions`
-也会返回逐条的文本结果，因此这些工具在纯命令行环境下同样可用。
-
-此类客户端若同时支持 MCP `elicitation`（Codex CLI 即是），文本列表**开头**会给出明确的下一步指示，
-要求模型立即调用 `select_sessions` 而不是把清单丢给用户后停下等待。该工具弹出三步表单：
-
-1. **筛选**：会话范围、最后更新时间、类别标签（标签选项按实际会话数量生成）；
-2. **选择**：把筛选结果按每页 10 个编号列出，用一个输入框收多选结果，支持 `1,3`、`5-7`、`all`，`clear` 清空重选；
-   结果超过一页时，输入序号后会单独再弹一张“完成选择 / 下一页 / 上一页”表单决定下一步。
-   每张表单只放一个字段：Codex CLI 会把同一张表单的所有字段依次问一遍再统一提交，
-   把序号和翻页放在一起会导致选完“完成选择”又被追问一次序号。
-   序号在整个结果集中始终有效，已选中的会话会在列表中标为 `✓` 并汇总显示，可以边翻页边累加；
-3. **操作**：取消、归档所选、永久删除所选，默认取消。
-
-表单文案跟随宿主语言：Codex Host 提供语言时按其显示中文或英文，未提供时回退到进程的 `LANG` 等环境变量，最后回落中文。类别标签、日期区间和序号错误提示都会一并本地化。
-
-列表与管理页依据同一份数据：子代理、审查等普通派生会话同样不单独列出，但会以“连带 N 个派生会话”
-标明删除的影响范围；隐藏分叉、已归档、临时会话和被分叉引用的会话都会标注出来。
-当前会话和其他受保护会话标为 `⊘`，仍然可见但不能被选中，
-误选时会指出具体序号并要求重新输入；`all` 表示全选当前筛选下可操作的会话，会自动跳过受保护项。
-序号无法识别或超出范围时同样不会中止流程，而是在同一张表单里提示原因并重新输入，不会猜测用户意图。
-无论筛选到多少会话都不会被拒绝，页码会如实显示总页数（例如“第 1/17 页”），由用户自行决定是继续翻页还是缩小筛选。
-表单等待的是用户操作而非机器应答，因此超时放宽到 15 分钟，足够翻页挑选，同时仍能兜住挂死的客户端。
-取消筛选会退回普通文本列表。
-
-由于会话与操作都已由用户在表单中敲定，删除会直接执行，不会再追加一次确认；单次仍最多处理 100 个会话，
-与 `delete_sessions` 的批量上限一致。
-
-交互流程只在显式调用 `select_sessions` 时发生。插件不会根据客户端握手去猜测该弹表单还是该显示管理页——
-能渲染管理页的客户端（如 ChatGPT 桌面端）调用 `open_session_manager` 始终直接得到管理页。
-
-命令行环境下应通过 `select_sessions` 发起清理，它会在删除前完成完整的选择与操作确认。
-
-Codex CLI 的 elicitation 表单只支持字符串、数字、整数和布尔四种基本类型，没有数组类型，
-因此无法呈现原生的列表多选控件；编号输入是该限制下一次选中多个会话的方式。
-
-`delete_sessions` 自身不弹表单：确认已经由各自的入口完成——管理页要求勾选并输入确认词，
-`select_sessions` 要求在表单中选定会话与操作。插件不会去判断请求来自哪个入口，
-因此任何客户端在管理页中删除都不会被追加一次多余的确认。
+在不能渲染 MCP Apps 组件的客户端中，工具会返回结构化的文本会话列表而不是管理页，
+并在开头提示改用命令行版插件 `codex-session-cleaner-cli`——那一版通过交互表单完成勾选与操作，
+本版不提供交互表单，因此模型不会在管理页可用时误弹表单。
 
 ## 安全边界
 
@@ -216,6 +138,9 @@ codex plugin remove codex-session-cleaner@codex-plugins
 
 ## 本地开发
 
+`server/core.py` 与命令行版共享同一份内容，改动后须同步到 `../codex-session-cleaner-cli/server/core.py`；
+`tests/test_core_parity.py` 会校验两者一致。
+
 本地调试时，可将仓库目录直接注册为 marketplace：
 
 ```bash
@@ -227,7 +152,7 @@ codex plugin add codex-session-cleaner@codex-plugins
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m compileall server tui tests
+python3 -m compileall server tests
 ```
 
 启动 MCP 服务器：
@@ -244,13 +169,11 @@ python3 -m compileall server tui tests
 .codex-plugin/plugin.json  插件清单与默认触发语句
 .mcp.json                  MCP 服务器启动配置
 skills/session-manager/    会话管理技能说明
-server/server.py           MCP 与 Codex app-server 适配层
+server/core.py             与命令行版共享的核心逻辑
+server/server.py           管理页版工具面
 web/manager.html           自包含的 MCP Apps 管理页
-tui/session_tui.py         纯标准库 curses 终端界面
-scripts/launch_tui.sh      终端界面启动脚本
 assets/screenshots/        README 使用的管理页与删除确认截图
 tests/test_server.py       后端与页面契约测试
-tests/test_tui.py          终端界面状态、宽度与渲染测试
 ```
 
 ## 许可证

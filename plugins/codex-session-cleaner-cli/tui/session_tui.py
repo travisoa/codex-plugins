@@ -20,7 +20,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parent.parent
-SERVER_MODULE = "session_cleaner_server"
+SERVER_MODULE = "session_cleaner_core"
 # CLI 会话不属于任何 Codex 线程，用固定上下文 ID 走完整的后端校验。
 CLI_CONTEXT_ID = "codex-session-cleaner-cli"
 CURRENT_THREAD_ENV = ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_CONVERSATION_ID")
@@ -37,13 +37,13 @@ DATE_PRESETS = (
 
 
 def load_server() -> Any:
-    """Load server.py once, sharing the instance with tests that already loaded it."""
+    """Load core.py once, sharing the instance with tests that already loaded it."""
     existing = sys.modules.get(SERVER_MODULE)
     if existing is not None:
         return existing
-    spec = importlib.util.spec_from_file_location(SERVER_MODULE, ROOT / "server" / "server.py")
+    spec = importlib.util.spec_from_file_location(SERVER_MODULE, ROOT / "server" / "core.py")
     if spec is None or spec.loader is None:
-        raise RuntimeError("无法加载 server.py。")
+        raise RuntimeError("无法加载 core.py。")
     module = importlib.util.module_from_spec(spec)
     sys.modules[SERVER_MODULE] = module
     spec.loader.exec_module(module)

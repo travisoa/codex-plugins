@@ -1,0 +1,38 @@
+{
+  "name": "codex-session-cleaner-cli",
+  "version": "0.1.0+codex.20260823",
+  "description": "\u5728 Codex CLI \u4e2d\u901a\u8fc7\u4ea4\u4e92\u8868\u5355\u7b5b\u9009\u3001\u52fe\u9009\u5e76\u5f52\u6863\u6216\u6c38\u4e45\u5220\u9664\u672c\u5730\u4f1a\u8bdd\uff0c\u53e6\u9644\u7eaf\u7ec8\u7aef\u754c\u9762\u3002",
+  "author": {
+    "name": "zhuzhongtao"
+  },
+  "homepage": "https://github.com/travisoa/codex-plugins/tree/main/plugins/codex-session-cleaner-cli",
+  "repository": "https://github.com/travisoa/codex-plugins",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "session-management",
+    "productivity"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex \u4f1a\u8bdd\u6e05\u7406\u5668 \u00b7 \u547d\u4ee4\u884c\u7248",
+    "shortDescription": "\u5728\u547d\u4ee4\u884c\u4e2d\u4ea4\u4e92\u5f0f\u6e05\u7406 Codex \u4f1a\u8bdd",
+    "longDescription": "\u9762\u5411 Codex CLI\uff1a\u901a\u8fc7\u4ea4\u4e92\u8868\u5355\u5b8c\u6210\u7b5b\u9009\u3001\u9009\u62e9\u4e0e\u5f52\u6863/\u5220\u9664\uff0c\u5e76\u63d0\u4f9b\u7eaf\u6807\u51c6\u5e93\u7684\u7ec8\u7aef\u754c\u9762\uff08TUI\uff09\u3002\u4e0d\u542b\u53ef\u89c6\u5316\u7ba1\u7406\u9875\uff0c\u684c\u9762\u5ba2\u6237\u7aef\u8bf7\u5b89\u88c5 codex-session-cleaner\u3002",
+    "developerName": "zhuzhongtao",
+    "category": "Productivity",
+    "capabilities": [
+      "MCP elicitation",
+      "Codex app-server",
+      "CLI TUI"
+    ],
+    "websiteURL": "https://github.com/travisoa/codex-plugins/tree/main/plugins/codex-session-cleaner-cli",
+    "composerIcon": "./assets/icon-v2.png",
+    "logo": "./assets/icon-v2.png",
+    "defaultPrompt": [
+      "\u4ea4\u4e92\u5f0f\u6e05\u7406 Codex \u4f1a\u8bdd",
+      "\u6253\u5f00 Codex \u4f1a\u8bdd\u9009\u62e9\u5668",
+      "\u5e2e\u6211\u5220\u6389\u4e0d\u518d\u9700\u8981\u7684 Codex \u4f1a\u8bdd"
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}
