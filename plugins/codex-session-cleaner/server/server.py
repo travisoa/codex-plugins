@@ -1212,11 +1212,6 @@ PICK_PAGE_SIZE = 10
 PICK_MAX_ROUNDS = 500
 
 
-def _should_elicit() -> bool:
-    """仅在宿主能弹表单、但渲染不了管理页组件时接管确认（即 Codex CLI）。"""
-    return _host_renders_ui() is False and _host_supports_elicitation()
-
-
 def _elicit_target_labels(thread_id: str, item: dict[str, Any]) -> tuple[str, str]:
     """与管理页卡片保持同样的判断依据：影响删除范围的信息都要能看到。"""
     title = str(item.get("title") or "未命名会话")
@@ -1237,15 +1232,19 @@ def _elicit_target_labels(thread_id: str, item: dict[str, Any]) -> tuple[str, st
 
 
 def _confirm_delete_targets(
-    ids: list[str], by_id: dict[str, dict[str, Any]]
+    ids: list[str], by_id: dict[str, dict[str, Any]], *, from_manager: bool
 ) -> tuple[list[str], str | None]:
-    """Let the user pick the final delete list on hosts that render no component.
+    """Have the user settle the final delete list when the model chose it alone.
+
+    A call carrying a manager-page context was already driven by the user
+    picking rows there, so it is passed through. Anything else is a list the
+    model assembled, and gets confirmed whenever the host can show a form.
 
     Returns (confirmed ids, refusal reason). The reason is set whenever the
     deletion must not proceed, so a failed or declined prompt never falls
     through to deleting everything the model proposed.
     """
-    if not _should_elicit():
+    if from_manager or not _host_supports_elicitation():
         return ids, None
 
     if len(ids) <= ELICIT_FIELD_LIMIT:
@@ -1760,29 +1759,8 @@ def _record_host(params: Any) -> None:
     _HOST["protocolVersion"] = params.get("protocolVersion")
 
 
-def _host_renders_ui() -> bool | None:
-    """True/False 表示宿主是否声明了组件渲染能力，None 表示还无从判断。
-
-    未知时一律按“支持”处理，避免把新版宿主错误降级成纯文本。
-    """
-    capabilities = _HOST.get("capabilities")
-    if not isinstance(capabilities, dict):
-        return None
-    for key in ("ui", "components", "outputTemplates", "apps"):
-        if key in capabilities:
-            return True
-    experimental = capabilities.get("experimental")
-    if isinstance(experimental, dict):
-        for key in experimental:
-            lowered = str(key).lower()
-            if "ui" in lowered or "app" in lowered or "template" in lowered:
-                return True
-    return False
-
-
 def _tui_hint() -> str:
-    if _host_renders_ui() is not False:
-        return ""
+    """只有渲染不了管理页组件的客户端会读到这段文本，无需再判断宿主类型。"""
     if _host_supports_elicitation():
         return "\n\n如需勾选式批量操作，可调用 select_sessions 进入交互式筛选、选择与操作。"
     return (
@@ -1920,11 +1898,12 @@ def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]
         data = archive_sessions(_validate_ids(arguments.get("threadIds")), current_id)
         return _text_result(data, _operation_text(data, "归档"))
     if name == "delete_sessions":
-        current_id, _ = _current_id_for_call(meta, arguments, require=True)
+        current_id, manager_context = _current_id_for_call(meta, arguments, require=True)
         requested = _validate_ids(arguments.get("threadIds"))
         confirmed, refusal = _confirm_delete_targets(
             requested,
             {item["id"]: item for item in list_sessions(current_id, "all", "")["sessions"]},
+            from_manager=bool(manager_context),
         )
         if refusal:
             return _text_result(

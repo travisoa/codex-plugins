@@ -594,7 +594,7 @@ class SessionCleanerTests(unittest.TestCase):
             )
             connection.close()
 
-    def test_host_without_ui_capability_is_detected(self):
+    def test_host_handshake_is_recorded(self):
         # 取自 Codex CLI v0.149.0 的真实 initialize 握手。
         server.handle({
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -604,26 +604,18 @@ class SessionCleanerTests(unittest.TestCase):
                 "clientInfo": {"name": "codex-mcp-client", "title": "Codex", "version": "0.149.0"},
             },
         })
-        self.assertFalse(server._host_renders_ui())
         self.assertEqual(server._HOST["clientInfo"]["title"], "Codex")
+        self.assertTrue(server._host_supports_elicitation())
 
-    def test_unknown_host_is_never_downgraded_to_text_only(self):
+    def test_elicitation_support_is_not_inferred_from_missing_keys(self):
+        """能力只按明确声明判断，不从“没有某个键”反推客户端类型。"""
         server._HOST.clear()
-        self.assertIsNone(server._host_renders_ui())
-        self.assertEqual(server._tui_hint(), "")
-
-    def test_host_declaring_a_ui_capability_keeps_the_component(self):
-        for capabilities in (
-            {"ui": {}},
-            {"experimental": {"openai/outputTemplate": {}}},
-            {"experimental": {"mcpApps": {}}},
-        ):
-            server.handle({
-                "jsonrpc": "2.0", "id": 1, "method": "initialize",
-                "params": {"capabilities": capabilities},
-            })
-            self.assertTrue(server._host_renders_ui(), capabilities)
-            self.assertEqual(server._tui_hint(), "")
+        self.assertFalse(server._host_supports_elicitation())
+        server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"capabilities": {"tools": {}}},
+        })
+        self.assertFalse(server._host_supports_elicitation())
 
     def test_text_fallback_lists_sessions_with_ids(self):
         server._HOST.clear()
@@ -647,7 +639,7 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertIn("共 80 个可管理 Codex 会话", body)
         self.assertIn("另有 50 个会话未列出", body)
 
-    def test_text_fallback_points_each_host_at_the_right_affordance(self):
+    def test_text_fallback_points_at_the_right_affordance(self):
         server.APP = FakeApp(active=[{"id": "t", "name": "n", "cwd": "/tmp", "updatedAt": 1}])
 
         def body(capabilities):
@@ -657,18 +649,11 @@ class SessionCleanerTests(unittest.TestCase):
             })
             return server.call_tool("list_sessions", {}, {"threadId": "m"})["content"][0]["text"]
 
-        # 能弹表单的宿主应被引导去交互式勾选，而不是另开一个 TUI。
+        # 能弹表单的客户端被指向交互工具，否则才建议终端界面。
         with_elicitation = body({"elicitation": {"form": {}}})
         self.assertIn("select_sessions", with_elicitation)
         self.assertNotIn("launch_tui.sh", with_elicitation)
-
-        # 两种能力都没有的宿主才建议用终端界面。
         self.assertIn("launch_tui.sh", body({"tools": {}}))
-
-        # 能渲染管理页的宿主不需要任何额外提示。
-        rendered = body({"ui": {}})
-        self.assertNotIn("launch_tui.sh", rendered)
-        self.assertNotIn("select_sessions", rendered)
 
     def test_operation_text_reports_each_failure(self):
         server._HOST.clear()
@@ -1280,11 +1265,27 @@ class ElicitationConfirmTests(unittest.TestCase):
         result = self.delete([f"t-{index}" for index in range(12)])
         self.assertEqual(result["structuredContent"]["results"], [])
 
-    def test_hosts_with_a_manager_page_are_not_prompted_again(self):
-        self.host(self.DESKTOP)
+    def test_a_request_from_the_manager_page_is_not_confirmed_again(self):
+        """管理页已由用户勾选过，不该再弹一次表单。"""
+        self.host(self.CLI)
+        opened = server.call_tool(
+            "open_session_manager", {}, {"openai/threadId": "manager"}
+        )["structuredContent"]
         self.answer({"action": "decline"})
-        result = self.delete(["t-0"])
+        result = server.call_tool(
+            "delete_sessions",
+            {"threadIds": ["t-0"], "confirmation": "删除",
+             "managerContext": opened["managerContext"]},
+            None,
+        )
         self.assertEqual(self.prompts, [])
+        self.assertEqual(self.deleted(result), ["t-0"])
+
+    def test_a_list_the_model_assembled_is_still_confirmed(self):
+        self.host(self.CLI)
+        self.answer({"action": "accept", "content": {"t-0": True}})
+        result = self.delete(["t-0", "t-1"])
+        self.assertEqual(len(self.prompts), 1)
         self.assertEqual(self.deleted(result), ["t-0"])
 
     def test_hosts_without_elicitation_are_not_prompted(self):
