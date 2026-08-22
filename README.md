@@ -17,7 +17,7 @@
 codex plugin marketplace add travisoa/codex-plugins --ref main
 ```
 
-按客户端选择其一安装——桌面客户端装管理页版，Codex CLI 装命令行版：
+按客户端选择其一安装：桌面客户端使用管理页版，Codex CLI 使用命令行版。
 
 ```bash
 codex plugin add codex-session-cleaner@codex-plugins
