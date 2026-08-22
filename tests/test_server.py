@@ -45,12 +45,10 @@ class SessionCleanerTests(unittest.TestCase):
             "notification": {"notifiedThreadIds": list(ids), "error": None},
             "warnings": [],
         }
-        server.PROTECTED_THREAD_IDS.clear()
 
     def tearDown(self):
         server.APP = self.original_app
         server.sync_desktop_sidebar = self.original_sync
-        server.PROTECTED_THREAD_IDS.clear()
 
     def test_extracts_thread_id_from_supported_metadata(self):
         self.assertEqual(server._thread_id_from_meta({"openai/threadId": "abc"}), "abc")
@@ -75,6 +73,21 @@ class SessionCleanerTests(unittest.TestCase):
         row = server.list_sessions("manager", "active")["sessions"][0]
         self.assertTrue(row["current"])
         self.assertFalse(row["deletable"])
+
+    def test_previous_manager_thread_can_be_deleted_from_new_manager_thread(self):
+        server.APP = FakeApp(active=[
+            {"id": "old-manager", "name": "Old manager", "cwd": "/tmp", "parentThreadId": None},
+            {"id": "new-manager", "name": "New manager", "cwd": "/tmp", "parentThreadId": None},
+        ])
+        server.list_sessions("old-manager", "all")
+
+        rows = server.list_sessions("new-manager", "all")["sessions"]
+        old_manager = next(row for row in rows if row["id"] == "old-manager")
+        self.assertTrue(old_manager["deletable"])
+
+        data = server.delete_sessions(["old-manager"], "永久删除", "new-manager")
+        self.assertTrue(data["results"][0]["ok"])
+        self.assertIn(("thread/delete", {"threadId": "old-manager"}), server.APP.calls)
 
     def test_session_listing_is_not_silently_truncated(self):
         active = [
@@ -156,12 +169,12 @@ class SessionCleanerTests(unittest.TestCase):
             server.delete_sessions(["victim"], "永久删除", None)
         self.assertFalse(any(method == "thread/delete" for method, _ in server.APP.calls))
 
-    def test_delete_rejects_protected_thread_as_atomic_batch(self):
+    def test_delete_rejects_current_thread_as_atomic_batch(self):
         server.APP = FakeApp(active=[
             {"id": "manager", "name": "Manager", "cwd": "/tmp", "parentThreadId": None},
             {"id": "victim", "name": "Victim", "cwd": "/tmp", "parentThreadId": None},
         ])
-        with self.assertRaisesRegex(ValueError, "受保护"):
+        with self.assertRaisesRegex(ValueError, "当前管理会话"):
             server.delete_sessions(["victim", "manager"], "永久删除", "manager")
         self.assertFalse(any(method == "thread/delete" for method, _ in server.APP.calls))
 

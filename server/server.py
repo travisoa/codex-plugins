@@ -167,7 +167,6 @@ class AppServerClient:
 
 APP = AppServerClient()
 atexit.register(APP.close)
-PROTECTED_THREAD_IDS: set[str] = set()
 
 
 def _codex_home() -> Path:
@@ -466,7 +465,7 @@ def _normalize_thread(thread: dict[str, Any], archived: bool, current_id: str | 
         "source": thread.get("source"),
         "projectId": thread.get("projectId"),
         "current": str(thread.get("id") or "") == current_id,
-        "protected": str(thread.get("id") or "") in PROTECTED_THREAD_IDS,
+        "protected": str(thread.get("id") or "") == current_id,
     }
 
 
@@ -506,8 +505,6 @@ def list_sessions(
     date_start, date_end = _date_filter_bounds(
         date_preset, custom_start, custom_end, now
     )
-    if current_id:
-        PROTECTED_THREAD_IDS.add(current_id)
     raw: list[tuple[dict[str, Any], bool]] = []
     if scope in ("active", "all"):
         raw.extend((item, False) for item in _list_one(False, search))
@@ -627,7 +624,7 @@ def _validate_ids(value: Any) -> list[str]:
 
 def archive_sessions(ids: list[str], current_id: str | None) -> dict[str, Any]:
     results = []
-    protected = PROTECTED_THREAD_IDS | ({current_id} if current_id else set())
+    protected = {current_id} if current_id else set()
     for thread_id in ids:
         if thread_id in protected:
             results.append({"threadId": thread_id, "ok": False, "error": "当前管理会话受保护。"})
@@ -645,10 +642,8 @@ def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -
         raise ValueError("确认词不正确，必须输入“永久删除”。")
     if not current_id:
         raise ValueError("缺少当前会话元数据；为避免误删，已拒绝操作。请从 Codex 会话管理页执行。")
-    PROTECTED_THREAD_IDS.add(current_id)
-    protected = PROTECTED_THREAD_IDS | {current_id}
-    if any(thread_id in protected for thread_id in ids):
-        raise ValueError("选中项包含当前或受保护会话，已拒绝整批删除。")
+    if current_id in ids:
+        raise ValueError("选中项包含当前管理会话，已拒绝整批删除。")
     sessions = list_sessions(current_id, "all", "")["sessions"]
     by_id = {item["id"]: item for item in sessions}
     unavailable = [thread_id for thread_id in ids if thread_id not in by_id]
@@ -747,8 +742,6 @@ def _text_result(data: dict[str, Any], summary: str) -> dict[str, Any]:
 
 def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]:
     current_id = _thread_id_from_meta(meta)
-    if current_id:
-        PROTECTED_THREAD_IDS.add(current_id)
     if name in ("open_session_manager", "list_sessions"):
         scope = "all" if name == "open_session_manager" else str(arguments.get("scope") or "all")
         if scope not in ("active", "archived", "all"):
