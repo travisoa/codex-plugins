@@ -1049,6 +1049,24 @@ def inspect_files(thread_id: str) -> dict[str, Any]:
     }
 
 
+# Codex 对每个会话有跨进程写锁：会话在某个窗口里打开时，别的进程就改不动它。
+# 原始报错是英文且不说明怎么办，这里翻成可执行的指引。
+_BUSY_MARKERS = ("active writer", "active observer", "active or pending turn")
+
+
+def _friendly_thread_error(exc: Exception) -> str:
+    detail = str(exc)
+    lowered = detail.lower()
+    if any(marker in lowered for marker in _BUSY_MARKERS):
+        return (
+            "该会话正在 Codex 中打开，被占用而无法操作。"
+            "请先在 Codex 里切换到别的会话（或关掉它所在的窗口/标签页），再重试；"
+            "也可以直接在 Codex 侧边栏中对它操作。"
+            f"（原始错误：{detail}）"
+        )
+    return detail
+
+
 def _validate_ids(value: Any) -> list[str]:
     if not isinstance(value, list):
         raise ValueError("threadIds 必须是数组。")
@@ -1091,7 +1109,9 @@ def archive_sessions(ids: list[str], current_id: str | None) -> dict[str, Any]:
             archived_ids.append(thread_id)
             results.append({"threadId": thread_id, "ok": True})
         except Exception as exc:
-            results.append({"threadId": thread_id, "ok": False, "error": str(exc)})
+            results.append(
+                {"threadId": thread_id, "ok": False, "error": _friendly_thread_error(exc)}
+            )
     # 归档只改状态、不删数据，因此只广播通知，不动桌面目录里的条目。
     cwd_by_id = {
         thread_id: str((by_id.get(thread_id) or {}).get("cwd") or "")
@@ -1208,7 +1228,9 @@ def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -
             deleted.add(thread_id)
             results.append({"threadId": thread_id, "ok": True})
         except Exception as exc:
-            results.append({"threadId": thread_id, "ok": False, "error": str(exc)})
+            results.append(
+                {"threadId": thread_id, "ok": False, "error": _friendly_thread_error(exc)}
+            )
     cwd_by_id = {thread_id: str(by_id[thread_id].get("cwd") or "") for thread_id in deleted_ids}
     sidebar_sync = sync_desktop_sidebar(deleted_ids, cwd_by_id)
     return {
@@ -1333,6 +1355,7 @@ record_host = _record_host
 write_message = _write_message
 notify_desktop_sidebar = _notify_desktop_sidebar
 scan_history_base_threads = _scan_history_base_threads
+friendly_thread_error = _friendly_thread_error
 
 
 def build_handler(

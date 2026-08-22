@@ -1353,5 +1353,45 @@ class ElicitationFailureTests(unittest.TestCase):
         self.assertIn("取消", outcome["note"])
         self.assertNotIn("未能显示", outcome["note"])
 
+class BusyThreadErrorTests(unittest.TestCase):
+    """Codex 对会话有跨进程写锁，报错必须让用户知道该怎么办。"""
+
+    def setUp(self):
+        self.original_app = core.APP
+        self.original_scan = core._scan_history_base_threads
+        self.original_notify = core._notify_desktop_sidebar
+        core._scan_history_base_threads = lambda: []
+        core._notify_desktop_sidebar = lambda ids, cwd: {
+            "available": False, "notifiedThreadIds": [], "error": None
+        }
+
+    def tearDown(self):
+        core.APP = self.original_app
+        core._scan_history_base_threads = self.original_scan
+        core._notify_desktop_sidebar = self.original_notify
+
+    def test_a_locked_session_explains_how_to_proceed(self):
+        class LockedApp(FakeApp):
+            def request(self, method, params):
+                if method == "thread/archive":
+                    raise RuntimeError(
+                        "thread/archive 失败：thread t-0 already has an active writer"
+                    )
+                return super().request(method, params)
+
+        core.APP = LockedApp(active=[
+            {"id": "t-0", "name": "会话", "cwd": "/tmp", "source": "vscode"},
+        ])
+        error = core.archive_sessions(["t-0"], "manager")["results"][0]["error"]
+        self.assertIn("正在 Codex 中打开", error)
+        self.assertIn("侧边栏", error)
+        # 原始英文报错保留在括号里，便于排查。
+        self.assertIn("active writer", error)
+
+    def test_unrelated_failures_are_passed_through_unchanged(self):
+        detail = "no rollout found for thread id t-0"
+        self.assertEqual(core._friendly_thread_error(RuntimeError(detail)), detail)
+
+
 if __name__ == "__main__":
     unittest.main()

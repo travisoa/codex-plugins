@@ -89,6 +89,14 @@ codex plugin add codex-session-cleaner-cli@codex-plugins
 独立运行 TUI 时，进程本身不属于任何 Codex 会话，默认没有“当前会话”可保护；
 需要保护某个正在运行的会话时用 `--current <thread-id>` 指定。
 
+### 会话被占用无法归档或删除
+
+Codex 对每个会话有跨进程写锁：会话正在某个窗口或标签页中打开时，只有持有它的那个进程能改动它，
+其他进程（包括本插件）会收到 `already has an active writer`。这是 Codex 的机制，插件无法绕过。
+
+遇到该提示时，先在 Codex 里切换到别的会话（或关掉它所在的窗口），再重试；
+也可以直接在 Codex 侧边栏中对它归档。
+
 ## 提供的工具
 
 | 工具 | 用途 |
