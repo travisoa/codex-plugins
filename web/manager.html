@@ -233,9 +233,39 @@
         }
       }
 
+      function copyTextWithSelection(text) {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', 'true');
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-10000px';
+        textarea.style.top = '0';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.focus({ preventScroll: true });
+        textarea.select();
+        textarea.setSelectionRange(0, text.length);
+        let copied = false;
+        try { copied = document.execCommand('copy'); }
+        catch { copied = false; }
+        textarea.remove();
+        return copied;
+      }
+
       async function copyText(text) {
-        try { await navigator.clipboard.writeText(text); showToast('路径已复制'); }
-        catch { showToast('无法访问剪贴板，请手动复制'); }
+        // 选区复制必须在用户点击的同步调用栈内执行，否则受限 iframe 可能丢失用户手势。
+        if (copyTextWithSelection(text)) {
+          showToast('路径已复制');
+          return;
+        }
+        try {
+          if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text);
+            showToast('路径已复制');
+            return;
+          }
+        } catch {}
+        showToast('无法访问剪贴板，请手动复制');
       }
 
       async function refresh() {

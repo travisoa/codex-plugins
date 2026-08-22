@@ -123,6 +123,15 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertIn("Codex 会话清理器", content["text"])
         self.assertIn("tools/call", content["text"])
 
+    def test_ui_has_selection_based_clipboard_fallback(self):
+        html = server.UI_PATH.read_text(encoding="utf-8")
+        self.assertIn("function copyTextWithSelection(text)", html)
+        self.assertIn("document.execCommand('copy')", html)
+        self.assertLess(
+            html.index("if (copyTextWithSelection(text))"),
+            html.index("navigator.clipboard?.writeText"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
