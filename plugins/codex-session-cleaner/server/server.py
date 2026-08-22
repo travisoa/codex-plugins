@@ -1382,57 +1382,80 @@ def _parse_selection(raw: Any, sessions: list[dict[str, Any]]) -> list[str]:
     return picked
 
 
-NEXT_PAGE_WORDS = {"n", "next", ">", "下一页", "下页"}
-PREV_PAGE_WORDS = {"p", "prev", "previous", "<", "上一页", "上页"}
+CLEAR_WORDS = {"clear", "reset", "清空", "重选"}
+
+
+def _pick_row(index: int, item: dict[str, Any], chosen: bool) -> str:
+    title, detail = _elicit_target_labels(item["id"], item)
+    if item.get("current"):
+        mark, suffix = "⊘", "（当前会话，受保护）"
+    elif not item.get("deletable"):
+        mark, suffix = "⊘", "（不可操作）"
+    else:
+        mark, suffix = ("✓" if chosen else "·"), ""
+    return f"{index}. {mark} {title}{suffix} — {detail}"
 
 
 def _pick_message(
-    sessions: list[dict[str, Any]], page: int, pages: int, warning: str = ""
+    sessions: list[dict[str, Any]],
+    page: int,
+    pages: int,
+    selected: list[str],
+    warning: str = "",
 ) -> str:
     first = page * PICK_PAGE_SIZE
     window = sessions[first : first + PICK_PAGE_SIZE]
+    chosen = set(selected)
     lines = []
     if warning:
-        lines.append(f"⚠ {warning}")
-        lines.append("")
+        lines.extend([f"⚠ {warning}", ""])
     header = f"筛选到 {len(sessions)} 个会话"
     if pages > 1:
         header += f"（第 {page + 1}/{pages} 页，显示第 {first + 1}-{first + len(window)} 个）"
     lines.append(header + "：")
     for offset, item in enumerate(window, start=first + 1):
-        title, detail = _elicit_target_labels(item["id"], item)
-        lines.append(f"{offset}. {title} — {detail}")
+        lines.append(_pick_row(offset, item, item["id"] in chosen))
     lines.append("")
-    if pages > 1:
-        lines.append("输入序号选择（序号跨页有效，如 1,15,23）；输入 n 看下一页、p 看上一页；留空结束。")
-    else:
-        lines.append("请输入要处理的序号（此步只做选择，不会归档或删除）。")
+    if selected:
+        numbers = [
+            str(index)
+            for index, item in enumerate(sessions, start=1)
+            if item["id"] in chosen
+        ]
+        lines.append(f"已选 {len(selected)} 个：{', '.join(numbers)}")
+    lines.append(
+        "输入序号可累加选择（如 1,3,5-7；all 选全部，clear 清空）；"
+        + ("选择下一页/上一页可继续浏览，" if pages > 1 else "")
+        + "选择“完成选择”提交。"
+    )
     return "\n".join(lines)
 
 
 def _elicit_pick(sessions: list[dict[str, Any]]) -> tuple[list[str] | None, str | None]:
-    """分页列出候选，用一个输入框收多选结果；翻页和纠错都在同一个表单里完成。"""
+    """分页列出候选，序号跨页累加，翻页与提交由选项字段控制。"""
     pages = max(1, -(-len(sessions) // PICK_PAGE_SIZE))
     page = 0
     warning = ""
+    selected: list[str] = []
     for _ in range(PICK_MAX_ROUNDS):
-        title = "要处理的序号"
+        properties: dict[str, Any] = {
+            "selection": {
+                "type": "string",
+                "title": f"要处理的序号（1-{len(sessions)}）",
+                "description": "多个用逗号分隔，可用区间；留空表示不新增选择。",
+            }
+        }
         if pages > 1:
-            title += f"（1-{len(sessions)}，或 n/p 翻页）"
-        else:
-            title += f"（1-{len(sessions)}）"
+            properties["page"] = {
+                "type": "string",
+                "title": "翻页 / 提交",
+                "enum": ["done", "next", "prev"],
+                "enumNames": ["完成选择", "下一页", "上一页"],
+                "default": "done",
+            }
         params = {
-            "message": _pick_message(sessions, page, pages, warning),
-            "requestedSchema": {
-                "type": "object",
-                "properties": {
-                    "selection": {
-                        "type": "string",
-                        "title": title,
-                        "description": "多个用逗号分隔，可用区间，例如 1,3,5-7；输入 all 选全部；留空表示不选。",
-                    }
-                },
-            },
+            "message": _pick_message(sessions, page, pages, selected, warning),
+            "requestedSchema": {"type": "object", "properties": properties},
         }
         try:
             result = HOST.request("elicitation/create", params, timeout=120.0)
@@ -1443,22 +1466,42 @@ def _elicit_pick(sessions: list[dict[str, Any]]) -> tuple[list[str] | None, str 
             return None, None
         content = result.get("content")
         content = content if isinstance(content, dict) else {}
-        written = str(content.get("selection") or "").strip()
 
-        command = written.lower()
-        if command in NEXT_PAGE_WORDS:
+        warning = ""
+        written = str(content.get("selection") or "").strip()
+        if written.lower() in CLEAR_WORDS:
+            selected = []
+            written = ""
+        elif written:
+            try:
+                picked = _parse_selection(written, sessions)
+            except ValueError as exc:
+                warning = f"{exc}请重新输入。"
+                continue
+            by_id = {item["id"]: item for item in sessions}
+            blocked = [
+                index
+                for index, item in enumerate(sessions, start=1)
+                if item["id"] in picked and not item.get("deletable")
+            ]
+            if blocked:
+                labels = "、".join(str(number) for number in blocked[:3])
+                warning = f"第 {labels} 项是当前会话或受保护会话，不能操作，请重新输入。"
+                continue
+            for thread_id in picked:
+                if thread_id not in selected and thread_id in by_id:
+                    selected.append(thread_id)
+
+        move = str(content.get("page") or "done")
+        if move == "next":
             warning = "已经是最后一页。" if page >= pages - 1 else ""
             page = min(page + 1, pages - 1)
             continue
-        if command in PREV_PAGE_WORDS:
+        if move == "prev":
             warning = "已经是第一页。" if page == 0 else ""
             page = max(page - 1, 0)
             continue
-        try:
-            return _parse_selection(written, sessions), None
-        except ValueError as exc:
-            # 输错序号只需在同一张表单里重来，不必从头走一遍筛选。
-            warning = f"{exc}请重新输入。"
+        return selected, None
     return None, "多次输入未能确定选择，请重新打开会话管理页。"
 
 
@@ -1538,9 +1581,13 @@ def _interactive_pick(current_id: str | None, data: dict[str, Any]) -> dict[str,
         current_id, chosen["scope"], "", chosen["datePreset"], "", "", chosen["tag"]
     )
     outcome: dict[str, Any] = {"filter": chosen, "matched": filtered["total"]}
-    candidates = [item for item in filtered["sessions"] if item.get("deletable")]
-    if not filtered["sessions"]:
+    # 列出全部结果，当前会话也显示出来（标注受保护），避免用户以为它被漏掉了。
+    candidates = list(filtered["sessions"])
+    if not candidates:
         outcome["note"] = "该筛选条件下没有会话，请换个条件重试。"
+        return {"data": filtered, "outcome": outcome}
+    if not any(item.get("deletable") for item in candidates):
+        outcome["note"] = "该筛选条件下的会话都受保护，无法归档或删除。"
         return {"data": filtered, "outcome": outcome}
     if len(candidates) > PICK_LIST_LIMIT:
         outcome["note"] = (
