@@ -1,6 +1,6 @@
 # Codex 会话清理器
 
-本地 Codex 会话管理插件。通过 MCP Apps 管理页和 Codex `app-server` 集中查看当前及已归档会话，按状态、类别标签和日期筛选，核对项目与文件线索，并安全地批量归档或永久删除会话。
+本地 Codex 会话管理插件。通过 MCP Apps 管理页、终端界面（TUI）和 Codex `app-server` 集中查看当前及已归档会话，按状态、类别标签和日期筛选，核对项目与文件线索，并安全地批量归档或永久删除会话。
 
 ![Codex 会话清理器管理页](assets/screenshots/session-manager-overview.png)
 
@@ -17,13 +17,14 @@
 - 中文界面输入确认词 `删除`（英文界面输入 `delete`）后，批量删除所选会话及其派生会话；同批选择存在历史引用关系的分叉和源会话时，插件会先删除分叉；
 - 管理页根据 Codex Host 语言自动显示中文或英文，Host 未提供语言时回退到浏览器语言；也可使用标题栏中“当前管理会话受保护”旁的“中文 / EN”按钮手动切换，手动选择在当前页面内优先；
 - 删除成功后同步 Codex 桌面侧边栏，避免保留无法打开的历史条目；
-- 禁止删除当前管理会话和临时会话。
+- 禁止删除当前管理会话和临时会话；
+- 提供纯终端界面（TUI），在 Codex CLI 环境下用键盘完成同样的浏览、筛选、文件线索查看、归档与删除，并复用与管理页完全相同的后端安全规则。
 
 ## 运行要求
 
 - Codex CLI，且终端可执行 `codex`；
 - Python 3；
-- ChatGPT 桌面端 Codex，用于显示可视化管理页。
+- ChatGPT 桌面端 Codex，用于显示可视化管理页；终端界面（TUI）不需要桌面端，只需支持 curses 的终端。
 
 服务器仅使用 Python 标准库。Codex 插件支持从 ChatGPT 桌面端或 Codex CLI 安装，IDE 扩展暂不支持插件。参见 [OpenAI 插件文档](https://learn.chatgpt.com/docs/plugins)。
 
@@ -87,6 +88,46 @@ codex plugin list
 
 ![Codex 会话清理器永久删除确认](assets/screenshots/session-manager-delete-confirmation.png)
 
+### 在终端中使用（TUI）
+
+不打开桌面端时，可直接运行插件自带的终端界面：
+
+```bash
+./scripts/launch_tui.sh
+```
+
+从 marketplace 安装后，脚本位于插件安装目录下，例如：
+
+```bash
+~/.codex/plugins/cache/codex-plugins/codex-session-cleaner/*/scripts/launch_tui.sh
+```
+
+界面语言默认跟随 `LANG` 等环境变量，可用 `--lang zh` 或 `--lang en` 指定。
+
+按键：
+
+| 按键 | 作用 |
+| --- | --- |
+| `↑` `↓` / `k` `j` | 移动光标，`PgUp` `PgDn` 翻页 |
+| `空格` | 勾选或取消当前会话；受保护的会话不可勾选 |
+| `/` | 搜索标题、ID、标签或项目路径 |
+| `F` | 打开筛选面板，调整状态范围、类别标签和最后更新时间 |
+| `I` | 查看当前会话的修改文件与命令引用文件线索 |
+| `A` | 归档所选会话 |
+| `D` | 永久删除所选会话，需输入确认词 |
+| `R` | 刷新 |
+| `Q` | 退出 |
+
+终端界面直接复用 `server.py` 的列表、归档与删除实现，因此当前会话保护、临时会话保护、确认词校验、隐藏分叉阻塞和桌面侧边栏同步的行为与管理页完全一致。
+
+CLI 进程本身不属于任何 Codex 会话，默认没有“当前会话”可保护，此时列表中的顶层会话均可删除，界面右上角会显示“CLI 模式 · 未绑定当前会话”。若终端中另有正在运行的 Codex 会话需要保护，用 `--current` 显式指定：
+
+```bash
+./scripts/launch_tui.sh --current <thread-id>
+```
+
+指定后该会话在界面中标记为“当前”，且无法被勾选、归档或删除。
+
 ### 删除启动会话管理页的任务
 
 若删除用于启动会话管理页的任务失败，先在 Codex 侧边栏将该任务归档；随后新建或切换到另一个任务，重新打开会话管理页，在“已归档”或“全部”中选择原任务并执行永久删除。不要在原任务打开的管理页中删除该任务自身。
@@ -107,6 +148,8 @@ codex plugin list
 | `archive_sessions` | 批量归档所选顶层会话 |
 | `delete_sessions` | 在确认词与当前会话保护校验通过后永久删除会话 |
 
+终端界面不是 MCP 工具，由用户在终端中直接运行，不经过模型调用。
+
 ## 安全边界
 
 - 永久删除通过 Codex `thread/delete` 执行，删除所选持久化会话及其派生会话，且不可撤销；
@@ -118,6 +161,7 @@ codex plugin list
 - 同批选中的分叉删除失败时，源会话一并停止删除，避免留下悬空引用；
 - 管理页使用短期、不可伪造的上下文令牌维持当前会话保护；令牌失效后必须重新打开管理页；
 - 后端校验确认词、管理页上下文及非空会话 ID；
+- 终端界面复用同一套后端校验，不额外放宽任何限制；CLI 未绑定当前会话时没有“当前会话”可保护，需要保护时用 `--current` 指定；
 - 插件不会清理跨会话共享的插件缓存、模型缓存、认证信息或全局配置。
 
 ## 卸载
@@ -139,7 +183,7 @@ codex plugin add codex-session-cleaner@codex-plugins
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m compileall server tests
+python3 -m compileall server tui tests
 ```
 
 启动 MCP 服务器：
@@ -158,8 +202,11 @@ python3 -m compileall server tests
 skills/session-manager/    会话管理技能说明
 server/server.py           MCP 与 Codex app-server 适配层
 web/manager.html           自包含的 MCP Apps 管理页
+tui/session_tui.py         纯标准库 curses 终端界面
+scripts/launch_tui.sh      终端界面启动脚本
 assets/screenshots/        README 使用的管理页与删除确认截图
 tests/test_server.py       后端与页面契约测试
+tests/test_tui.py          终端界面状态、宽度与渲染测试
 ```
 
 ## 许可证
