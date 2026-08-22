@@ -1196,8 +1196,11 @@ def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -
 
 # 逐字段渲染的宿主上，字段太多会让用户按很多次回车，超过就改用整体确认。
 ELICIT_FIELD_LIMIT = 8
-# 序号输入只占一个字段，所以一次能列出的候选比逐字段确认多得多。
-PICK_LIST_LIMIT = 30
+# 序号输入只占一个字段，候选分页列出，避免一次塞进过长的提示语。
+PICK_PAGE_SIZE = 10
+PICK_MAX_ROUNDS = 40
+# 分页之后没有硬性上限，只在极端数量下提示先筛选，防止翻页本身变成负担。
+PICK_LIST_LIMIT = 200
 
 
 def _should_elicit() -> bool:
@@ -1379,42 +1382,84 @@ def _parse_selection(raw: Any, sessions: list[dict[str, Any]]) -> list[str]:
     return picked
 
 
-def _elicit_pick(sessions: list[dict[str, Any]]) -> tuple[list[str] | None, str | None]:
-    """列出编号清单，用一个输入框收多选结果。返回 (选中 ID, 错误说明)。"""
-    listing = []
-    for index, item in enumerate(sessions, start=1):
+NEXT_PAGE_WORDS = {"n", "next", ">", "下一页", "下页"}
+PREV_PAGE_WORDS = {"p", "prev", "previous", "<", "上一页", "上页"}
+
+
+def _pick_message(
+    sessions: list[dict[str, Any]], page: int, pages: int, warning: str = ""
+) -> str:
+    first = page * PICK_PAGE_SIZE
+    window = sessions[first : first + PICK_PAGE_SIZE]
+    lines = []
+    if warning:
+        lines.append(f"⚠ {warning}")
+        lines.append("")
+    header = f"筛选到 {len(sessions)} 个会话"
+    if pages > 1:
+        header += f"（第 {page + 1}/{pages} 页，显示第 {first + 1}-{first + len(window)} 个）"
+    lines.append(header + "：")
+    for offset, item in enumerate(window, start=first + 1):
         title, detail = _elicit_target_labels(item["id"], item)
-        listing.append(f"{index}. {title} — {detail}")
-    params = {
-        "message": (
-            f"筛选到 {len(sessions)} 个会话：\n"
-            + "\n".join(listing)
-            + "\n\n请输入要处理的序号（此步只做选择，不会归档或删除）。"
-        ),
-        "requestedSchema": {
-            "type": "object",
-            "properties": {
-                "selection": {
-                    "type": "string",
-                    "title": f"要处理的序号（1-{len(sessions)}）",
-                    "description": "多个用逗号分隔，可用区间，例如 1,3,5-7；输入 all 选全部；留空表示不选。",
-                }
+        lines.append(f"{offset}. {title} — {detail}")
+    lines.append("")
+    if pages > 1:
+        lines.append("输入序号选择（序号跨页有效，如 1,15,23）；输入 n 看下一页、p 看上一页；留空结束。")
+    else:
+        lines.append("请输入要处理的序号（此步只做选择，不会归档或删除）。")
+    return "\n".join(lines)
+
+
+def _elicit_pick(sessions: list[dict[str, Any]]) -> tuple[list[str] | None, str | None]:
+    """分页列出候选，用一个输入框收多选结果；翻页和纠错都在同一个表单里完成。"""
+    pages = max(1, -(-len(sessions) // PICK_PAGE_SIZE))
+    page = 0
+    warning = ""
+    for _ in range(PICK_MAX_ROUNDS):
+        title = "要处理的序号"
+        if pages > 1:
+            title += f"（1-{len(sessions)}，或 n/p 翻页）"
+        else:
+            title += f"（1-{len(sessions)}）"
+        params = {
+            "message": _pick_message(sessions, page, pages, warning),
+            "requestedSchema": {
+                "type": "object",
+                "properties": {
+                    "selection": {
+                        "type": "string",
+                        "title": title,
+                        "description": "多个用逗号分隔，可用区间，例如 1,3,5-7；输入 all 选全部；留空表示不选。",
+                    }
+                },
             },
-        },
-    }
-    try:
-        result = HOST.request("elicitation/create", params, timeout=120.0)
-    except Exception:
-        return None, None
-    result = result if isinstance(result, dict) else {}
-    if str(result.get("action") or "") != "accept":
-        return None, None
-    content = result.get("content")
-    content = content if isinstance(content, dict) else {}
-    try:
-        return _parse_selection(content.get("selection"), sessions), None
-    except ValueError as exc:
-        return None, str(exc)
+        }
+        try:
+            result = HOST.request("elicitation/create", params, timeout=120.0)
+        except Exception:
+            return None, None
+        result = result if isinstance(result, dict) else {}
+        if str(result.get("action") or "") != "accept":
+            return None, None
+        content = result.get("content")
+        content = content if isinstance(content, dict) else {}
+        written = str(content.get("selection") or "").strip()
+
+        command = written.lower()
+        if command in NEXT_PAGE_WORDS:
+            warning = "已经是最后一页。" if page >= pages - 1 else ""
+            page = min(page + 1, pages - 1)
+            continue
+        if command in PREV_PAGE_WORDS:
+            warning = "已经是第一页。" if page == 0 else ""
+            page = max(page - 1, 0)
+            continue
+        try:
+            return _parse_selection(written, sessions), None
+        except ValueError as exc:
+            # 输错序号只需在同一张表单里重来，不必从头走一遍筛选。
+            warning = f"{exc}请重新输入。"
+    return None, "多次输入未能确定选择，请重新打开会话管理页。"
 
 
 def _elicit_action(count: int) -> str:
@@ -1499,7 +1544,7 @@ def _interactive_pick(current_id: str | None, data: dict[str, Any]) -> dict[str,
         return {"data": filtered, "outcome": outcome}
     if len(candidates) > PICK_LIST_LIMIT:
         outcome["note"] = (
-            f"筛选后仍有 {len(candidates)} 个可操作会话，超过单次可列出的 {PICK_LIST_LIMIT} 个；"
+            f"筛选后仍有 {len(candidates)} 个可操作会话，翻页选择过于繁琐；"
             "请缩小时间范围或指定标签后重新打开。"
         )
         return {"data": filtered, "outcome": outcome}

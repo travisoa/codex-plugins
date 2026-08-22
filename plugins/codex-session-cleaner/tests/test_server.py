@@ -889,13 +889,58 @@ class InteractivePickerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "无法识别"):
             server._parse_selection("abc", sessions)
 
-    def test_a_bad_selection_reports_the_error_and_does_nothing(self):
+    def test_a_bad_selection_reprompts_instead_of_starting_over(self):
         self.host(3)
-        self.answers(self.FILTER_OK, {"action": "accept", "content": {"selection": "9"}})
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "9"}},
+            {"action": "accept", "content": {"selection": "2"}},
+            {"action": "accept", "content": {"action": "cancel"}},
+        )
         outcome = self.open()["structuredContent"]["interactive"]
-        self.assertNotIn("selectedThreadIds", outcome)
-        self.assertIn("超出范围", outcome["note"])
-        self.assertEqual(len(self.prompts), 2)  # 没有走到操作表单
+        self.assertEqual(outcome["selectedThreadIds"], ["t-1"])
+        # 出错后在同一张表单里重来，并把原因显示出来。
+        self.assertIn("超出范围", self.prompts[2]["message"])
+        self.assertIn("请重新输入", self.prompts[2]["message"])
+
+    def test_paging_keeps_numbers_valid_across_pages(self):
+        self.host(25)
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "n"}},
+            {"action": "accept", "content": {"selection": "n"}},
+            {"action": "accept", "content": {"selection": "p"}},
+            {"action": "accept", "content": {"selection": "3,15"}},
+            {"action": "accept", "content": {"action": "cancel"}},
+        )
+        outcome = self.open()["structuredContent"]["interactive"]
+        # 跨页序号照样有效。
+        self.assertEqual(outcome["selectedThreadIds"], ["t-2", "t-14"])
+        first, second, third = self.prompts[1], self.prompts[2], self.prompts[3]
+        self.assertIn("第 1/3 页", first["message"])
+        self.assertIn("第 2/3 页", second["message"])
+        self.assertIn("第 3/3 页", third["message"])
+        self.assertIn("11. ", second["message"])
+        self.assertIn("21. ", third["message"])
+
+    def test_paging_past_the_last_page_says_so(self):
+        self.host(15)
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "n"}},
+            {"action": "accept", "content": {"selection": "n"}},
+            {"action": "accept", "content": {"selection": ""}},
+        )
+        self.open()
+        self.assertIn("已经是最后一页", self.prompts[3]["message"])
+
+    def test_a_single_page_listing_shows_no_paging_hints(self):
+        self.host(4)
+        self.answers(self.FILTER_OK, {"action": "accept", "content": {"selection": ""}})
+        self.open()
+        message = self.prompts[1]["message"]
+        self.assertNotIn("页", message)
+        self.assertNotIn("n 看下一页", message)
 
     def test_choosing_cancel_performs_nothing(self):
         self.host(4)
@@ -941,13 +986,19 @@ class InteractivePickerTests(unittest.TestCase):
         self.assertEqual(tag_field["enumNames"][0], "不限")
         self.assertGreater(len(tag_field["enum"]), 1)
 
-    def test_too_many_matches_ask_for_a_narrower_filter_instead_of_prompting(self):
+    def test_a_moderate_result_set_is_paged_rather_than_refused(self):
         self.host(40)
+        self.answers(self.FILTER_OK, {"action": "accept", "content": {"selection": ""}})
+        outcome = self.open()["structuredContent"]["interactive"]
+        self.assertIn("没有勾选", outcome["note"])
+        self.assertIn("第 1/4 页", self.prompts[1]["message"])
+
+    def test_an_unreasonable_result_set_still_asks_for_a_narrower_filter(self):
+        self.host(server.PICK_LIST_LIMIT + 5)
         self.answers(self.FILTER_OK)
-        result = self.open()
-        outcome = result["structuredContent"]["interactive"]
+        outcome = self.open()["structuredContent"]["interactive"]
         self.assertNotIn("selectedThreadIds", outcome)
-        self.assertIn("超过单次可列出的", outcome["note"])
+        self.assertIn("翻页选择过于繁琐", outcome["note"])
         self.assertEqual(len(self.prompts), 1)
 
     def test_cancelling_the_filter_falls_back_to_the_text_listing(self):
