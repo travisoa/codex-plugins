@@ -246,6 +246,12 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertIn('id="customStart"', html)
         self.assertIn('id="customEnd"', html)
 
+    def test_date_filter_options_keep_contrast_in_native_popup(self):
+        html = server.UI_PATH.read_text(encoding="utf-8")
+        self.assertIn(".date-select option", html)
+        self.assertIn("color:#17191d", html)
+        self.assertIn("background:#fff", html)
+
 
 if __name__ == "__main__":
     unittest.main()
