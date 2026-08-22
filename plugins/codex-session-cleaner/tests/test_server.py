@@ -911,40 +911,42 @@ class InteractivePickerTests(unittest.TestCase):
         self.host(25)
         self.answers(
             self.FILTER_OK,
-            {"action": "accept", "content": {"selection": "3", "page": "next"}},
-            {"action": "accept", "content": {"selection": "15", "page": "next"}},
-            {"action": "accept", "content": {"selection": "", "page": "prev"}},
-            {"action": "accept", "content": {"selection": "", "page": "done"}},
+            {"action": "accept", "content": {"selection": "3"}},
+            {"action": "accept", "content": {"page": "next"}},
+            {"action": "accept", "content": {"selection": "15"}},
+            {"action": "accept", "content": {"page": "done"}},
             {"action": "accept", "content": {"action": "cancel"}},
         )
         outcome = self.open()["structuredContent"]["interactive"]
         # 每页选的都累加下来，不用最后一次性重输。
         self.assertEqual(outcome["selectedThreadIds"], ["t-2", "t-14"])
-        page_field = self.prompts[1]["requestedSchema"]["properties"]["page"]
+        # 每张表单只问一件事，避免选完“完成选择”又被追问序号。
+        for form in self.prompts[1:5]:
+            self.assertEqual(len(form["requestedSchema"]["properties"]), 1)
+        page_field = self.prompts[2]["requestedSchema"]["properties"]["page"]
         self.assertEqual(page_field["enum"], ["done", "next", "prev"])
         self.assertEqual(page_field["enumNames"], ["完成选择", "下一页", "上一页"])
         self.assertEqual(page_field["default"], "done")
         self.assertIn("第 1/3 页", self.prompts[1]["message"])
-        self.assertIn("第 2/3 页", self.prompts[2]["message"])
-        self.assertIn("已选 1 个：3", self.prompts[2]["message"])
-        self.assertIn("已选 2 个：3, 15", self.prompts[3]["message"])
+        self.assertIn("第 2/3 页", self.prompts[3]["message"])
+        self.assertIn("已选 1 个：3", self.prompts[3]["message"])
 
     def test_already_chosen_rows_are_ticked_and_clear_resets_them(self):
         self.host(15)  # 多页时才有“完成选择”一步，可以边看边加
         self.answers(
             self.FILTER_OK,
-            {"action": "accept", "content": {"selection": "2", "page": "next"}},
-            {"action": "accept", "content": {"selection": "", "page": "prev"}},
-            {"action": "accept", "content": {"selection": "clear", "page": "prev"}},
-            {"action": "accept", "content": {"selection": "", "page": "done"}},
+            {"action": "accept", "content": {"selection": "2"}},
+            {"action": "accept", "content": {"page": "next"}},
+            {"action": "accept", "content": {"selection": "clear"}},
+            {"action": "accept", "content": {"page": "prev"}},
+            {"action": "accept", "content": {"selection": ""}},
+            {"action": "accept", "content": {"page": "done"}},
         )
         self.open()
-        listing = self.prompts[3]["message"]
-        self.assertIn("2. ✓ ", listing)
-        self.assertIn("已选 1 个：2", listing)
+        self.assertIn("已选 1 个：2", self.prompts[3]["message"])
         # clear 之后回到未选状态。
-        self.assertNotIn("已选", self.prompts[4]["message"])
-        self.assertIn("2. · ", self.prompts[4]["message"])
+        self.assertIn("2. · ", self.prompts[5]["message"])
+        self.assertNotIn("已选", self.prompts[5]["message"])
 
     def test_a_single_page_submits_straight_away(self):
         self.host(4)
@@ -976,12 +978,15 @@ class InteractivePickerTests(unittest.TestCase):
         self.host(15)
         self.answers(
             self.FILTER_OK,
-            {"action": "accept", "content": {"selection": "", "page": "next"}},
-            {"action": "accept", "content": {"selection": "", "page": "next"}},
-            {"action": "accept", "content": {"selection": "", "page": "done"}},
+            {"action": "accept", "content": {"selection": ""}},
+            {"action": "accept", "content": {"page": "next"}},
+            {"action": "accept", "content": {"selection": ""}},
+            {"action": "accept", "content": {"page": "next"}},
+            {"action": "accept", "content": {"selection": ""}},
+            {"action": "accept", "content": {"page": "done"}},
         )
         self.open()
-        self.assertIn("已经是最后一页", self.prompts[3]["message"])
+        self.assertIn("已经是最后一页", self.prompts[5]["message"])
 
     def test_a_single_page_listing_shows_no_paging_hints(self):
         self.host(4)
@@ -1038,7 +1043,8 @@ class InteractivePickerTests(unittest.TestCase):
     def test_a_moderate_result_set_is_paged_rather_than_refused(self):
         self.host(40)
         self.answers(self.FILTER_OK,
-                     {"action": "accept", "content": {"selection": "", "page": "done"}})
+                     {"action": "accept", "content": {"selection": ""}},
+                     {"action": "accept", "content": {"page": "done"}})
         outcome = self.open()["structuredContent"]["interactive"]
         self.assertIn("没有勾选", outcome["note"])
         self.assertIn("第 1/4 页", self.prompts[1]["message"])
@@ -1047,7 +1053,8 @@ class InteractivePickerTests(unittest.TestCase):
         self.host(163)  # 与真实会话量相当
         self.answers(
             self.FILTER_OK,
-            {"action": "accept", "content": {"selection": "7,101", "page": "done"}},
+            {"action": "accept", "content": {"selection": "7,101"}},
+            {"action": "accept", "content": {"page": "done"}},
             {"action": "accept", "content": {"action": "cancel"}},
         )
         outcome = self.open()["structuredContent"]["interactive"]
@@ -1170,7 +1177,8 @@ class InteractivePickerTests(unittest.TestCase):
         self.host(server.BATCH_LIMIT + 20)
         self.answers(
             self.FILTER_OK,
-            {"action": "accept", "content": {"selection": "all", "page": "done"}},
+            {"action": "accept", "content": {"selection": "all"}},
+            {"action": "accept", "content": {"page": "done"}},
             {"action": "accept", "content": {"action": "delete"}},
         )
         outcome = self.open()["structuredContent"]["interactive"]

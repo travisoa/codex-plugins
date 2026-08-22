@@ -1230,11 +1230,15 @@ ELICIT_TEXT = {
         "colon": "：",
         "pageInfo": lambda page, pages, first, last: f"（第 {page}/{pages} 页，显示第 {first}-{last} 个）",
         "chosenSummary": lambda count, numbers: f"已选 {count} 个：{numbers}",
-        "pickHintPaged": "输入序号可累加选择（如 1,3,5-7；all 选全部，clear 清空）；选择下一页/上一页可继续浏览，选择“完成选择”提交。",
+        "pickHintPaged": "输入序号可累加选择（如 1,3,5-7；all 选全部，clear 清空）；留空直接回车即可，下一步再决定翻页或提交。",
         "pickHintSingle": "请输入要处理的序号（此步只做选择，不会归档或删除）。",
         "pickTitle": lambda total: f"要处理的序号（1-{total}）",
         "pickDescription": "多个用逗号分隔，可用区间；留空表示不新增选择。",
         "pageField": "翻页 / 提交",
+        "pageMessage": lambda count, page, pages: (
+            f"当前第 {page}/{pages} 页，已选 {count} 个会话。"
+            "选择“完成选择”提交，或继续翻页浏览。"
+        ),
         "pageNames": ["完成选择", "下一页", "上一页"],
         "lastPage": "已经是最后一页。",
         "firstPage": "已经是第一页。",
@@ -1271,11 +1275,15 @@ ELICIT_TEXT = {
         "colon": ":",
         "pageInfo": lambda page, pages, first, last: f" (page {page}/{pages}, showing {first}-{last})",
         "chosenSummary": lambda count, numbers: f"{count} selected: {numbers}",
-        "pickHintPaged": "Type numbers to add to the selection (e.g. 1,3,5-7; all selects everything, clear resets); use next/previous page to browse, then choose Done to submit.",
+        "pickHintPaged": "Type numbers to add to the selection (e.g. 1,3,5-7; all selects everything, clear resets); leave empty and press enter — paging or submitting is the next step.",
         "pickHintSingle": "Type the numbers to act on (this step only selects; nothing is archived or deleted).",
         "pickTitle": lambda total: f"Numbers to act on (1-{total})",
         "pickDescription": "Comma-separated, ranges allowed; leave empty to add nothing.",
         "pageField": "Page / submit",
+        "pageMessage": lambda count, page, pages: (
+            f"Page {page}/{pages}, {count} session(s) selected. "
+            "Choose Done to submit, or keep paging."
+        ),
         "pageNames": ["Done", "Next page", "Previous page"],
         "lastPage": "Already on the last page.",
         "firstPage": "Already on the first page.",
@@ -1325,6 +1333,8 @@ def _tag_label(key: str) -> str:
 
 
 BATCH_LIMIT = 100
+# elicitation 等的是人：翻页挑选上百个会话远不止两分钟，超时只用于兜住挂死的宿主。
+ELICIT_TIMEOUT_SECONDS = 900
 PICK_PAGE_SIZE = 10
 # 只为挡住异常宿主造成的死循环，正常翻页远达不到这个次数。
 PICK_MAX_ROUNDS = 500
@@ -1400,7 +1410,7 @@ def _elicit_filter(
         },
     }
     try:
-        result = HOST.request("elicitation/create", params, timeout=120.0)
+        result = HOST.request("elicitation/create", params, timeout=ELICIT_TIMEOUT_SECONDS)
     except Exception as exc:
         return None, str(exc)
     result = result if isinstance(result, dict) else {}
@@ -1497,34 +1507,33 @@ def _pick_message(
 
 
 def _elicit_pick(sessions: list[dict[str, Any]]) -> tuple[list[str] | None, str | None]:
-    """分页列出候选，序号跨页累加，翻页与提交由选项字段控制。"""
+    """分页列出候选，序号跨页累加。
+
+    每张表单只放一个字段：Codex CLI 会把一张表单的所有字段依次问一遍再统一提交，
+    把“翻页/提交”和“序号”放在一起，用户选完“完成选择”还会被再问一次序号，
+    而且字段先后顺序由客户端决定，读起来是反的。
+    """
     pages = max(1, -(-len(sessions) // PICK_PAGE_SIZE))
     page = 0
     warning = ""
     selected: list[str] = []
     for _ in range(PICK_MAX_ROUNDS):
         copy = _t()
-        properties: dict[str, Any] = {
-            "selection": {
-                "type": "string",
-                "title": copy["pickTitle"](len(sessions)),
-                "description": copy["pickDescription"],
-            }
-        }
-        if pages > 1:
-            properties["page"] = {
-                "type": "string",
-                "title": copy["pageField"],
-                "enum": ["done", "next", "prev"],
-                "enumNames": copy["pageNames"],
-                "default": "done",
-            }
-        params = {
+        entry = {
             "message": _pick_message(sessions, page, pages, selected, warning),
-            "requestedSchema": {"type": "object", "properties": properties},
+            "requestedSchema": {
+                "type": "object",
+                "properties": {
+                    "selection": {
+                        "type": "string",
+                        "title": copy["pickTitle"](len(sessions)),
+                        "description": copy["pickDescription"],
+                    }
+                },
+            },
         }
         try:
-            result = HOST.request("elicitation/create", params, timeout=120.0)
+            result = HOST.request("elicitation/create", entry, timeout=ELICIT_TIMEOUT_SECONDS)
         except Exception as exc:
             return None, str(exc)
         result = result if isinstance(result, dict) else {}
@@ -1537,7 +1546,6 @@ def _elicit_pick(sessions: list[dict[str, Any]]) -> tuple[list[str] | None, str 
         written = str(content.get("selection") or "").strip()
         if written.lower() in CLEAR_WORDS:
             selected = []
-            written = ""
         elif written:
             try:
                 picked = _parse_selection(written, sessions)
@@ -1546,34 +1554,68 @@ def _elicit_pick(sessions: list[dict[str, Any]]) -> tuple[list[str] | None, str 
                 continue
             by_id = {item["id"]: item for item in sessions}
             if written.lower() in SELECT_ALL_WORDS:
-                # “全选”指全选可操作的，不该因为列表里混有受保护会话而报错。
-                picked = [
-                    thread_id for thread_id in picked if by_id[thread_id].get("deletable")
-                ]
+                picked = [t for t in picked if by_id[t].get("deletable")]
             blocked = [
                 index
                 for index, item in enumerate(sessions, start=1)
                 if item["id"] in picked and not item.get("deletable")
             ]
             if blocked:
-                labels = "、".join(str(number) for number in blocked[:3])
-                warning = copy["protectedRows"](labels)
+                warning = copy["protectedRows"]("、".join(str(n) for n in blocked[:3]))
                 continue
             for thread_id in picked:
                 if thread_id not in selected and thread_id in by_id:
                     selected.append(thread_id)
 
-        move = str(content.get("page") or "done")
+        if pages == 1:
+            return selected, None  # 只有一页时没什么可翻，直接提交
+
+        move, failure = _elicit_page_move(selected, page, pages)
+        if failure:
+            return None, failure
+        if move == "done":
+            return selected, None
         if move == "next":
             warning = copy["lastPage"] if page >= pages - 1 else ""
             page = min(page + 1, pages - 1)
-            continue
-        if move == "prev":
+        else:
             warning = copy["firstPage"] if page == 0 else ""
             page = max(page - 1, 0)
-            continue
-        return selected, None
     return None, "多次输入未能确定选择，请重新打开会话管理页。"
+
+
+def _elicit_page_move(
+    selected: list[str], page: int, pages: int
+) -> tuple[str, str | None]:
+    """单独一张表单只问“翻页还是提交”，默认停在“完成选择”。"""
+    copy = _t()
+    params = {
+        "message": copy["pageMessage"](len(selected), page + 1, pages),
+        "requestedSchema": {
+            "type": "object",
+            "properties": {
+                "page": {
+                    "type": "string",
+                    "title": copy["pageField"],
+                    "enum": ["done", "next", "prev"],
+                    "enumNames": copy["pageNames"],
+                    "default": "done",
+                }
+            },
+            "required": ["page"],
+        },
+    }
+    try:
+        result = HOST.request("elicitation/create", params, timeout=ELICIT_TIMEOUT_SECONDS)
+    except Exception as exc:
+        return "done", str(exc)
+    result = result if isinstance(result, dict) else {}
+    if str(result.get("action") or "") != "accept":
+        return "done", None
+    content = result.get("content")
+    content = content if isinstance(content, dict) else {}
+    move = str(content.get("page") or "done")
+    return (move if move in ("done", "next", "prev") else "done"), None
 
 
 def _elicit_action(count: int) -> tuple[str, str | None]:
@@ -1596,7 +1638,7 @@ def _elicit_action(count: int) -> tuple[str, str | None]:
         },
     }
     try:
-        result = HOST.request("elicitation/create", params, timeout=120.0)
+        result = HOST.request("elicitation/create", params, timeout=ELICIT_TIMEOUT_SECONDS)
     except Exception as exc:
         return "cancel", str(exc)
     result = result if isinstance(result, dict) else {}
