@@ -1,14 +1,14 @@
 {
-  "name": "codex-session-cleaner",
+  "name": "codex-plugins",
   "interface": {
-    "displayName": "Codex Session Cleaner"
+    "displayName": "Codex Plugins"
   },
   "plugins": [
     {
       "name": "codex-session-cleaner",
       "source": {
         "source": "local",
-        "path": "."
+        "path": "./plugins/codex-session-cleaner"
       },
       "policy": {
         "installation": "AVAILABLE",
