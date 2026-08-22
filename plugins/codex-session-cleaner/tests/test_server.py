@@ -431,15 +431,19 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertIn("color:#17191d", html)
         self.assertIn("background:#fff", html)
 
-    def test_selection_actions_stay_inside_sticky_toolbar(self):
+    def test_selection_actions_use_compact_wide_toolbar(self):
         html = server.UI_PATH.read_text(encoding="utf-8")
         toolbar_start = html.index('<section class="toolbar"')
         summary = html.index('<div class="summary">')
         toolbar_end = html.index("</section>", toolbar_start)
         self.assertLess(toolbar_start, summary)
         self.assertLess(summary, toolbar_end)
+        self.assertIn(".app { max-width:1340px", html)
         self.assertIn(".toolbar { position:sticky", html)
+        self.assertIn("grid-template-columns:minmax(220px,1fr) auto minmax(130px,155px) minmax(140px,170px) auto", html)
         self.assertIn(".summary { grid-column:1 / -1", html)
+        self.assertIn("padding:8px 9px", html)
+        self.assertIn("padding-top:6px", html)
 
 
 if __name__ == "__main__":
