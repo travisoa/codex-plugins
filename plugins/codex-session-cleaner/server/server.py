@@ -188,6 +188,58 @@ _MANAGER_CONTEXTS: dict[str, tuple[str, float]] = {}
 _HOST: dict[str, Any] = {}
 
 
+class HostError(RuntimeError):
+    pass
+
+
+def _write_message(message: dict[str, Any]) -> None:
+    sys.stdout.write(json.dumps(message, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+class HostBridge:
+    """Reverse JSON-RPC channel to the MCP host, used for elicitation.
+
+    Reads stdin inline while waiting, so anything the host sends meanwhile is
+    parked in `deferred` for the main loop to process afterwards.
+    """
+
+    def __init__(self) -> None:
+        self._next_id = 1
+        self.deferred: list[dict[str, Any]] = []
+
+    def request(self, method: str, params: dict[str, Any], timeout: float = 120.0) -> Any:
+        # 字符串前缀避免和宿主自己的数字 id 撞车。
+        request_id = f"scc-{self._next_id}"
+        self._next_id += 1
+        _write_message({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            line = sys.stdin.readline()
+            if not line:
+                raise HostError("宿主连接已关闭。")
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if message.get("id") == request_id and ("result" in message or "error" in message):
+                if "error" in message:
+                    error = message["error"]
+                    detail = error.get("message", str(error)) if isinstance(error, dict) else str(error)
+                    raise HostError(detail)
+                return message.get("result")
+            self.deferred.append(message)
+        raise HostError(f"等待宿主响应 {method} 超时。")
+
+
+HOST = HostBridge()
+
+
+def _host_supports_elicitation() -> bool:
+    capabilities = _HOST.get("capabilities")
+    return isinstance(capabilities, dict) and "elicitation" in capabilities
+
+
 def _codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
 
@@ -1142,6 +1194,147 @@ def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -
     }
 
 
+# --- 临时诊断：探测宿主的 elicitation 表单能力，确认后删除 -------------------
+PROBE_OPTIONS = [
+    {"value": "thread-a", "label": "会话 A · 修复登录问题", "description": "/tmp/project-a · 2 小时前"},
+    {"value": "thread-b", "label": "会话 B · 临时测试", "description": "/tmp/project-b · 12 天前"},
+    {"value": "thread-c", "label": "会话 C · 数据分析", "description": "/tmp/project-c · 已归档"},
+]
+
+
+def _probe_variants() -> list[tuple[str, dict[str, Any]]]:
+    """按“最可能正确”到“最试探性”的顺序排列，先报错的不会打扰用户。"""
+    labels = [option["label"] for option in PROBE_OPTIONS]
+    values = [option["value"] for option in PROBE_OPTIONS]
+    return [
+        (
+            "A. 标准 MCP · array + enum 多选",
+            {
+                "message": "【探针 A】请勾选要处理的会话，然后确认。",
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {
+                        "sessions": {
+                            "type": "array",
+                            "title": "会话",
+                            "description": "可多选",
+                            "items": {"type": "string", "enum": values, "enumNames": labels},
+                        }
+                    },
+                    "required": ["sessions"],
+                },
+            },
+        ),
+        (
+            "B. Codex 扩展 · variant=form + options",
+            {
+                "message": "【探针 B】请勾选要处理的会话，然后确认。",
+                "requestedSchema": {
+                    "variant": "form",
+                    "type": "object",
+                    "properties": {
+                        "sessions": {
+                            "type": "array",
+                            "title": "会话",
+                            "multi_select": True,
+                            "options": PROBE_OPTIONS,
+                        }
+                    },
+                },
+            },
+        ),
+        (
+            "C. Codex 扩展 · 顶层 options + multi_select",
+            {
+                "message": "【探针 C】请勾选要处理的会话，然后确认。",
+                "variant": "form",
+                "multi_select": True,
+                "options": PROBE_OPTIONS,
+            },
+        ),
+        (
+            "D. 标准 MCP · 每个会话一个 boolean",
+            {
+                "message": "【探针 D】请勾选要处理的会话，然后确认。",
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {
+                        option["value"]: {
+                            "type": "boolean",
+                            "title": option["label"],
+                            "description": option["description"],
+                        }
+                        for option in PROBE_OPTIONS
+                    },
+                },
+            },
+        ),
+        (
+            "E. 标准 MCP · enum 单选（最低要求）",
+            {
+                "message": "【探针 E】请选择一个会话，然后确认。",
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session": {
+                            "type": "string",
+                            "title": "会话",
+                            "enum": values,
+                            "enumNames": labels,
+                        }
+                    },
+                    "required": ["session"],
+                },
+            },
+        ),
+    ]
+
+
+def probe_elicitation() -> dict[str, Any]:
+    attempts: list[dict[str, Any]] = []
+    accepted: str | None = None
+    for name, params in _probe_variants():
+        record: dict[str, Any] = {"variant": name, "request": params}
+        try:
+            record["result"] = HOST.request("elicitation/create", params, timeout=180.0)
+            record["ok"] = True
+            attempts.append(record)
+            accepted = name
+            break  # 已经弹出并被响应，不再连续打扰用户
+        except HostError as exc:
+            record["ok"] = False
+            record["error"] = str(exc)
+            attempts.append(record)
+        except Exception as exc:
+            record["ok"] = False
+            record["error"] = f"{type(exc).__name__}: {exc}"
+            attempts.append(record)
+    return {
+        "hostClientInfo": _HOST.get("clientInfo"),
+        "hostCapabilities": _HOST.get("capabilities"),
+        "supportsElicitation": _host_supports_elicitation(),
+        "acceptedVariant": accepted,
+        "attempts": attempts,
+    }
+
+
+def _probe_text(data: dict[str, Any]) -> str:
+    lines = [
+        "=== elicitation 探针结果 ===",
+        f"宿主: {json.dumps(data.get('hostClientInfo'), ensure_ascii=False)}",
+        f"能力: {json.dumps(data.get('hostCapabilities'), ensure_ascii=False)}",
+        f"被接受的变体: {data.get('acceptedVariant') or '（全部失败）'}",
+        "",
+    ]
+    for attempt in data.get("attempts") or []:
+        lines.append(f"--- {attempt['variant']}")
+        if attempt.get("ok"):
+            lines.append(f"    成功，宿主返回: {json.dumps(attempt.get('result'), ensure_ascii=False)}")
+        else:
+            lines.append(f"    失败: {attempt.get('error')}")
+    return "\n".join(lines)
+
+
 def _tool_definitions() -> list[dict[str, Any]]:
     ui_meta = {"ui": {"resourceUri": RESOURCE_URI}, "openai/outputTemplate": RESOURCE_URI}
     return [
@@ -1152,6 +1345,13 @@ def _tool_definitions() -> list[dict[str, Any]]:
             "inputSchema": {"type": "object", "properties": {}},
             "annotations": {"readOnlyHint": True, "destructiveHint": False},
             "_meta": ui_meta,
+        },
+        {
+            "name": "probe_elicitation",
+            "title": "【临时诊断】探测交互表单能力",
+            "description": "临时诊断工具：依次尝试多种 elicitation 表单格式，用于确认当前客户端支持哪一种。确认后会移除。",
+            "inputSchema": {"type": "object", "properties": {}},
+            "annotations": {"readOnlyHint": True, "destructiveHint": False},
         },
         {
             "name": "list_sessions",
@@ -1348,6 +1548,9 @@ def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]
         if manager_context:
             data["managerContext"] = manager_context
         return _text_result(data, _sessions_text(data))
+    if name == "probe_elicitation":
+        data = probe_elicitation()
+        return _text_result(data, _probe_text(data))
     if name == "list_sessions":
         current_id, manager_context = _current_id_for_call(meta, arguments)
         scope = str(arguments.get("scope") or "all")
@@ -1423,16 +1626,25 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
         return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32000, "message": str(exc)}}
 
 
+def _dispatch(payload: Any) -> None:
+    try:
+        request = json.loads(payload) if isinstance(payload, str) else payload
+        response = handle(request)
+    except Exception as exc:
+        response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(exc)}}
+    if response is not None:
+        _write_message(response)
+
+
 def main() -> None:
-    for line in sys.stdin:
-        try:
-            request = json.loads(line)
-            response = handle(request)
-        except Exception as exc:
-            response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(exc)}}
-        if response is not None:
-            sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
-            sys.stdout.flush()
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            break
+        _dispatch(line)
+        # 处理 elicitation 等待期间宿主插进来的消息。
+        while HOST.deferred:
+            _dispatch(HOST.deferred.pop(0))
 
 
 if __name__ == "__main__":
