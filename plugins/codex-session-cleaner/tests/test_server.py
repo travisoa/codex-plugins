@@ -767,10 +767,17 @@ class SessionCleanerTests(unittest.TestCase):
         html = server.UI_PATH.read_text(encoding="utf-8")
         self.assertIn("function copyTextWithSelection(text)", html)
         self.assertIn("document.execCommand('copy')", html)
+        # clipboard API 会如实报成败，execCommand 在受限 iframe 里可能假成功，
+        # 所以前者必须先试；两者都不成时要留一个手动复制的出口。
         self.assertLess(
-            html.index("if (copyTextWithSelection(text))"),
             html.index("navigator.clipboard?.writeText"),
+            html.index("if (copyTextWithSelection(text))"),
         )
+        self.assertIn("function showManualCopy(text)", html)
+        self.assertIn("showManualCopy(text);", html)
+        self.assertIn('id="copyDialog"', html)
+        self.assertIn("copySessionId", html)
+        self.assertIn("copyText(session.id)", html)
         self.assertIn('value="older_than_3_months"', html)
         self.assertIn('value="within_1_day"', html)
         self.assertIn('value="within_1_week"', html)

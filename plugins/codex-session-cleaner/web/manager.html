@@ -132,6 +132,14 @@
       </div>
     </form>
   </dialog>
+  <dialog id="copyDialog">
+    <form method="dialog" class="modal">
+      <h2 id="manualCopyTitle"></h2>
+      <div id="manualCopyHint" class="muted"></div>
+      <input id="manualCopyValue" class="confirm" readonly style="margin-top:12px">
+      <div class="modal-actions"><button id="closeCopy" class="btn" value="default"></button></div>
+    </form>
+  </dialog>
   <div id="toast" class="toast" role="status"></div>
 
   <script>
@@ -155,7 +163,8 @@
           branch: value => `分支 ${value}`, descendants: count => `${count} 个派生会话`, blockers: count => `${count} 个引用分叉阻止源会话删除`, source: id => `引用源 ${id}`,
           collapseFiles: '收起文件', inspectFiles: '查看文件', copyProject: '复制项目路径', loadingFiles: '正在读取会话文件线索…',
           fileNote: '文件线索来自会话记录，可能不完整。', changedFiles: '修改文件', referencedFiles: '命令引用文件', noFiles: '未从会话记录中发现', copyPath: '复制路径',
-          copied: '路径已复制', copyFailed: '无法访问剪贴板，请手动复制', unknownError: '未知错误',
+          copied: '已复制', copyFailed: '无法访问剪贴板，请手动复制', unknownError: '未知错误',
+          copySessionId: '复制会话 ID', manualCopyTitle: '请手动复制', manualCopyHint: '内容已选中，按 ⌘C 或 Ctrl+C 复制。', close: '关闭',
           archiveFailed: (count, error) => `${count} 个会话归档失败：${error}`, archivedSuccess: '所选会话已归档',
           deleteHeading: count => `永久删除 ${count} 个会话？`, deleteDescription: 'Codex 会一并删除这些会话的派生会话和持久化元数据。此操作不可撤销。',
           deleteDanger: '项目文件不会被删除，但会话内容将无法从 Codex 恢复。', confirmationBefore: '输入 ', confirmationAfter: ' 继续', confirmation: '删除',
@@ -181,7 +190,8 @@
           branch: value => `Branch ${value}`, descendants: count => `${count} derived session${count === 1 ? '' : 's'}`, blockers: count => `${count} referencing fork${count === 1 ? '' : 's'} block source deletion`, source: id => `Source ${id}`,
           collapseFiles: 'Hide files', inspectFiles: 'View files', copyProject: 'Copy project path', loadingFiles: 'Loading session file clues…',
           fileNote: 'File clues are extracted from session records and may be incomplete.', changedFiles: 'Changed files', referencedFiles: 'Files referenced by commands', noFiles: 'None found in session records', copyPath: 'Copy path',
-          copied: 'Path copied', copyFailed: 'Clipboard unavailable; copy the path manually', unknownError: 'Unknown error',
+          copied: 'Copied', copyFailed: 'Clipboard unavailable; copy manually', unknownError: 'Unknown error',
+          copySessionId: 'Copy session ID', manualCopyTitle: 'Copy manually', manualCopyHint: 'The text is selected — press ⌘C or Ctrl+C.', close: 'Close',
           archiveFailed: (count, error) => `${count} session${count === 1 ? '' : 's'} failed to archive: ${error}`, archivedSuccess: 'Selected sessions archived',
           deleteHeading: count => `Permanently delete ${count} session${count === 1 ? '' : 's'}?`, deleteDescription: 'Codex will also delete derived sessions and persisted metadata. This action cannot be undone.',
           deleteDanger: 'Project files will not be deleted, but the session content cannot be recovered in Codex.', confirmationBefore: 'Type ', confirmationAfter: ' to continue', confirmation: 'delete',
@@ -435,6 +445,10 @@
           });
           side.append(inspect);
           if (session.cwd) { const copy = el('button', 'link', t().copyProject); copy.type='button'; copy.addEventListener('click', () => copyText(session.cwd)); side.append(copy); }
+          const copyId = el('button', 'link', t().copySessionId); copyId.type = 'button';
+          copyId.title = session.id;
+          copyId.addEventListener('click', () => copyText(session.id));
+          side.append(copyId);
           card.append(side); renderFiles(card, session); $('list').append(card);
         }
       }
@@ -458,12 +472,21 @@
         return copied;
       }
 
+      function showManualCopy(text) {
+        // execCommand 在受限 iframe 中可能返回成功却没真正写入剪贴板，
+        // 因此保留一个用户能自己选中复制的出口。
+        $('manualCopyTitle').textContent = t().manualCopyTitle;
+        $('manualCopyHint').textContent = t().manualCopyHint;
+        $('closeCopy').textContent = t().close;
+        const field = $('manualCopyValue');
+        field.value = text;
+        $('copyDialog').showModal();
+        field.focus({ preventScroll: true });
+        field.setSelectionRange(0, text.length);
+      }
+
       async function copyText(text) {
-        // 选区复制必须在用户点击的同步调用栈内执行，否则受限 iframe 可能丢失用户手势。
-        if (copyTextWithSelection(text)) {
-          showToast(t().copied);
-          return;
-        }
+        // clipboard API 会如实报告成败；选区复制不会，所以放在其后作为回退。
         try {
           if (navigator.clipboard?.writeText) {
             await navigator.clipboard.writeText(text);
@@ -471,7 +494,11 @@
             return;
           }
         } catch {}
-        showToast(t().copyFailed);
+        if (copyTextWithSelection(text)) {
+          showToast(t().copied);
+          return;
+        }
+        showManualCopy(text);
       }
 
       async function refresh() {
@@ -537,6 +564,7 @@
       $('archive').addEventListener('click', archiveSelected);
       $('delete').addEventListener('click', openDelete);
       $('cancelDelete').addEventListener('click', () => $('deleteDialog').close());
+      $('closeCopy').addEventListener('click', () => $('copyDialog').close());
       $('confirmation').addEventListener('input', event => { $('confirmDelete').disabled = event.target.value !== t().confirmation; });
       $('deleteForm').addEventListener('submit', performDelete);
 
