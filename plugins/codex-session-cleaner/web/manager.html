@@ -16,14 +16,14 @@
     h1 { font-size:25px; letter-spacing:-.02em; margin:0 0 4px; }
     .subtitle,.muted { color:var(--muted); }
     .shield { border:1px solid var(--line); background:var(--panel); padding:7px 10px; border-radius:999px; white-space:nowrap; }
-    .toolbar { position:sticky; top:0; z-index:3; display:grid; grid-template-columns:minmax(160px,1fr) auto auto auto; gap:10px; margin-bottom:10px; padding:12px; border:1px solid var(--line); border-radius:16px; background:var(--panel); backdrop-filter:blur(18px); box-shadow:var(--shadow); }
-    .search,.date-select,.date-input { border:1px solid var(--line); background:transparent; color:var(--text); border-radius:10px; padding:9px 11px; outline:none; }
+    .toolbar { position:sticky; top:0; z-index:3; display:grid; grid-template-columns:minmax(160px,1fr) auto auto auto auto; gap:10px; margin-bottom:10px; padding:12px; border:1px solid var(--line); border-radius:16px; background:var(--panel); backdrop-filter:blur(18px); box-shadow:var(--shadow); }
+    .search,.date-select,.tag-select,.date-input { border:1px solid var(--line); background:transparent; color:var(--text); border-radius:10px; padding:9px 11px; outline:none; }
     .search:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(22,119,255,.13); }
     .segments { display:flex; padding:3px; border:1px solid var(--line); border-radius:11px; }
     .segments button { border:0; background:transparent; border-radius:8px; padding:6px 10px; cursor:pointer; }
     .segments button.active { background:var(--text); color:var(--bg); }
-    .date-select { min-width:150px; cursor:pointer; }
-    .date-select option { color:#17191d; background:#fff; }
+    .date-select,.tag-select { min-width:138px; cursor:pointer; }
+    .date-select option,.tag-select option { color:#17191d; background:#fff; }
     .custom-dates { grid-column:1 / -1; display:flex; align-items:center; justify-content:flex-end; gap:8px; padding-top:2px; color:var(--muted); }
     .custom-dates[hidden] { display:none; }
     .btn { border:1px solid var(--line); background:var(--panel); border-radius:10px; padding:8px 11px; cursor:pointer; }
@@ -41,6 +41,7 @@
     .title { font-size:15px; font-weight:650; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .badge { display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:999px; padding:1px 7px; font-size:11px; color:var(--muted); white-space:nowrap; }
     .badge.current { color:var(--accent); border-color:rgba(22,119,255,.35); }
+    .badge.warning { color:#b54708; border-color:rgba(181,71,8,.35); background:rgba(255,171,64,.10); }
     .preview { color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:3px; }
     .meta { display:flex; flex-wrap:wrap; gap:6px 13px; margin-top:9px; color:var(--muted); font-size:12px; }
     .path { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; overflow-wrap:anywhere; }
@@ -70,12 +71,18 @@
       <div class="shield">🔒 当前管理会话受保护</div>
     </header>
     <section class="toolbar" aria-label="会话筛选">
-      <input id="search" class="search" type="search" placeholder="搜索会话标题或本页项目路径…">
+      <input id="search" class="search" type="search" placeholder="搜索标题、ID、标签或项目路径…">
       <div class="segments" role="tablist">
         <button data-scope="active">当前</button><button data-scope="archived">已归档</button><button data-scope="all" class="active">全部</button>
       </div>
+      <select id="tagFilter" class="tag-select" aria-label="按类别标签筛选">
+        <option value="">全部标签</option>
+      </select>
       <select id="datePreset" class="date-select" aria-label="按最后更新时间筛选">
         <option value="all">全部日期</option>
+        <option value="within_1_day">1 天内</option>
+        <option value="within_1_week">1 周内</option>
+        <option value="within_1_month">1 个月内</option>
         <option value="older_than_3_months">3 个月前（更早）</option>
         <option value="older_than_1_month">1 个月前（更早）</option>
         <option value="older_than_1_week">1 周前（更早）</option>
@@ -117,7 +124,7 @@
 
   <script>
     (() => {
-      const state = { sessions: [], selected: new Set(), scope: 'all', search: '', datePreset: 'all', customStart: '', customEnd: '', managerContext: '', files: new Map(), loading: false };
+      const state = { sessions: [], selected: new Set(), scope: 'all', search: '', tag: '', datePreset: 'all', customStart: '', customEnd: '', managerContext: '', files: new Map(), loading: false };
       const pending = new Map();
       let rpcId = 1;
       const $ = id => document.getElementById(id);
@@ -180,6 +187,9 @@
         if (state.datePreset === 'all') return true;
         const updatedAt = timeMs(session.updatedAt);
         if (updatedAt === null) return false;
+        if (state.datePreset === 'within_1_day') return updatedAt >= Date.now() - 24 * 60 * 60 * 1000;
+        if (state.datePreset === 'within_1_week') return updatedAt >= Date.now() - 7 * 24 * 60 * 60 * 1000;
+        if (state.datePreset === 'within_1_month') return updatedAt >= monthsBefore(1);
         if (state.datePreset === 'older_than_3_months') return updatedAt < monthsBefore(3);
         if (state.datePreset === 'older_than_1_month') return updatedAt < monthsBefore(1);
         if (state.datePreset === 'older_than_1_week') return updatedAt < Date.now() - 7 * 24 * 60 * 60 * 1000;
@@ -202,13 +212,31 @@
         return state.sessions.filter(s => {
           if (state.scope !== 'all' && (state.scope === 'archived') !== Boolean(s.archived)) return false;
           if (!matchesDate(s)) return false;
-          return !q || [s.title, s.preview, s.cwd, s.branch, s.id].some(v => String(v || '').toLowerCase().includes(q));
+          if (state.tag && !(s.tags || []).some(tag => tag.key === state.tag)) return false;
+          const labels = (s.tags || []).map(tag => tag.label);
+          return !q || [s.title, s.preview, s.cwd, s.branch, s.id, s.historyBaseThreadId, ...labels].some(v => String(v || '').toLowerCase().includes(q));
         });
+      }
+
+      function updateTagOptions(availableTags) {
+        const select = $('tagFilter');
+        const tags = Array.isArray(availableTags) && availableTags.length
+          ? availableTags
+          : [...new Map(state.sessions.flatMap(session => session.tags || []).map(tag => [tag.key, tag])).values()];
+        const current = state.tag;
+        select.replaceChildren(new Option('全部标签', ''));
+        for (const tag of tags) {
+          const count = Number.isFinite(Number(tag.count)) ? ` · ${tag.count}` : '';
+          select.append(new Option(`${tag.label}${count}`, tag.key));
+        }
+        state.tag = tags.some(tag => tag.key === current) ? current : '';
+        select.value = state.tag;
       }
 
       function applySessions(data) {
         if (typeof data.managerContext === 'string' && data.managerContext) state.managerContext = data.managerContext;
         state.sessions = Array.isArray(data.sessions) ? data.sessions : [];
+        updateTagOptions(data.availableTags);
         for (const id of [...state.selected]) if (!state.sessions.some(s => s.id === id && s.deletable)) state.selected.delete(id);
         render();
       }
@@ -262,6 +290,7 @@
           if (session.current) titleRow.append(el('span', 'badge current', '当前会话'));
           if (session.archived) titleRow.append(el('span', 'badge', '已归档'));
           if (session.ephemeral) titleRow.append(el('span', 'badge', '临时'));
+          for (const tag of session.tags || []) titleRow.append(el('span', `badge${tag.key === 'hidden-fork' ? ' warning' : ''}`, tag.label));
           body.append(titleRow);
           if (session.preview && session.preview !== session.title) body.append(el('div', 'preview', session.preview));
           const meta = el('div', 'meta');
@@ -269,6 +298,8 @@
           if (session.branch) meta.append(el('span', '', `分支 ${session.branch}`));
           meta.append(el('span', '', formatTime(session.updatedAt)));
           if (session.descendantCount) meta.append(el('span', '', `${session.descendantCount} 个派生会话`));
+          if (session.blockingForkCount) meta.append(el('span', '', `${session.blockingForkCount} 个引用分叉阻止源会话删除`));
+          if (session.historyBaseThreadId) meta.append(el('span', '', `引用源 ${session.historyBaseThreadId}`));
           body.append(meta); card.append(body);
 
           const side = el('div', 'side');
@@ -360,6 +391,7 @@
       }
 
       $('search').addEventListener('input', event => { state.search = event.target.value; render(); });
+      $('tagFilter').addEventListener('change', event => { state.tag = event.target.value; state.selected.clear(); render(); });
       $('datePreset').addEventListener('change', event => {
         state.datePreset = event.target.value;
         state.selected.clear();

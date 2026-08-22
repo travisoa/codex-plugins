@@ -39,7 +39,9 @@ class SessionCleanerTests(unittest.TestCase):
     def setUp(self):
         self.original_app = server.APP
         self.original_sync = server.sync_desktop_sidebar
+        self.original_history_scan = server._scan_history_base_threads
         server._MANAGER_CONTEXTS.clear()
+        server._scan_history_base_threads = lambda: []
         server.sync_desktop_sidebar = lambda ids, cwd_by_id: {
             "ok": True,
             "catalog": {"removedThreadIds": list(ids), "error": None},
@@ -50,6 +52,7 @@ class SessionCleanerTests(unittest.TestCase):
     def tearDown(self):
         server.APP = self.original_app
         server.sync_desktop_sidebar = self.original_sync
+        server._scan_history_base_threads = self.original_history_scan
         server._MANAGER_CONTEXTS.clear()
 
     def test_extracts_thread_id_from_supported_metadata(self):
@@ -194,6 +197,53 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertEqual({row["id"] for row in one_month["sessions"]}, {"old", "month"})
         self.assertEqual({row["id"] for row in one_week["sessions"]}, {"old", "month"})
 
+    def test_recent_date_presets_filter_by_last_updated_time(self):
+        now = datetime(2026, 8, 22, 12, 0, 0)
+        server.APP = FakeApp(active=[
+            {"id": "hours", "name": "Hours", "updatedAt": (now - timedelta(hours=12)).timestamp()},
+            {"id": "days", "name": "Days", "updatedAt": (now - timedelta(days=3)).timestamp()},
+            {"id": "weeks", "name": "Weeks", "updatedAt": (now - timedelta(days=20)).timestamp()},
+            {"id": "months", "name": "Months", "updatedAt": (now - timedelta(days=50)).timestamp()},
+        ])
+        one_day = server.list_sessions("manager", "active", date_preset="within_1_day", now=now)
+        one_week = server.list_sessions("manager", "active", date_preset="within_1_week", now=now)
+        one_month = server.list_sessions("manager", "active", date_preset="within_1_month", now=now)
+        self.assertEqual([row["id"] for row in one_day["sessions"]], ["hours"])
+        self.assertEqual({row["id"] for row in one_week["sessions"]}, {"hours", "days"})
+        self.assertEqual({row["id"] for row in one_month["sessions"]}, {"hours", "days", "weeks"})
+
+    def test_hidden_history_fork_is_listed_searchable_and_marks_source(self):
+        server.APP = FakeApp(active=[
+            {"id": "source", "name": "Source", "cwd": "/tmp/project", "updatedAt": 2},
+        ])
+        server._scan_history_base_threads = lambda: [{
+            "id": "hidden-fork",
+            "name": "Source (2)",
+            "cwd": "/tmp/project",
+            "source": "vscode",
+            "updatedAt": 3,
+            "archived": False,
+            "historyBaseThreadId": "source",
+            "hiddenFromList": True,
+        }]
+        data = server.list_sessions("manager", "all")
+        by_id = {row["id"]: row for row in data["sessions"]}
+        self.assertEqual(set(by_id), {"source", "hidden-fork"})
+        self.assertTrue(by_id["hidden-fork"]["hiddenFromList"])
+        self.assertIn("hidden-fork", {tag["key"] for tag in by_id["hidden-fork"]["tags"]})
+        self.assertEqual(by_id["source"]["blockingForkIds"], ["hidden-fork"])
+        searched = server.list_sessions("manager", "all", search="hidden-fork")
+        self.assertEqual([row["id"] for row in searched["sessions"]], ["hidden-fork"])
+
+    def test_tag_filter_uses_generated_category_labels(self):
+        server.APP = FakeApp(active=[
+            {"id": "plugin", "name": "修复插件", "cwd": "/tmp/codex-plugins", "updatedAt": 2},
+            {"id": "general", "name": "普通问答", "cwd": "/tmp", "updatedAt": 1},
+        ])
+        data = server.list_sessions("manager", "active", tag="plugin-development")
+        self.assertEqual([row["id"] for row in data["sessions"]], ["plugin"])
+        self.assertIn("plugin-development", {tag["key"] for tag in data["sessions"][0]["tags"]})
+
     def test_custom_date_filter_is_inclusive_for_both_dates(self):
         server.APP = FakeApp(active=[
             {"id": "inside", "name": "Inside", "updatedAt": datetime(2026, 8, 10, 23, 30).timestamp()},
@@ -260,6 +310,41 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertTrue(data["results"][0]["ok"])
         self.assertTrue(data["sidebarSync"]["ok"])
         self.assertIn(("thread/delete", {"threadId": "victim"}), server.APP.calls)
+
+    def test_delete_blocks_source_when_hidden_fork_is_not_selected(self):
+        server.APP = FakeApp(active=[
+            {"id": "source", "name": "Source", "cwd": "/tmp/project"},
+        ])
+        server._scan_history_base_threads = lambda: [{
+            "id": "hidden-fork",
+            "name": "Source (2)",
+            "cwd": "/tmp/project",
+            "archived": False,
+            "historyBaseThreadId": "source",
+            "hiddenFromList": True,
+        }]
+        data = server.delete_sessions(["source"], "永久删除", "manager")
+        self.assertFalse(data["results"][0]["ok"])
+        self.assertEqual(data["results"][0]["blockingThreadIds"], ["hidden-fork"])
+        self.assertFalse(any(method == "thread/delete" for method, _ in server.APP.calls))
+
+    def test_delete_orders_selected_history_fork_before_source(self):
+        server.APP = FakeApp(active=[
+            {"id": "source", "name": "Source", "cwd": "/tmp/project"},
+        ])
+        server._scan_history_base_threads = lambda: [{
+            "id": "hidden-fork",
+            "name": "Source (2)",
+            "cwd": "/tmp/project",
+            "archived": False,
+            "historyBaseThreadId": "source",
+            "hiddenFromList": True,
+        }]
+        data = server.delete_sessions(["source", "hidden-fork"], "永久删除", "manager")
+        delete_calls = [params["threadId"] for method, params in server.APP.calls if method == "thread/delete"]
+        self.assertEqual(delete_calls, ["hidden-fork", "source"])
+        self.assertEqual(data["operationOrder"], ["hidden-fork", "source"])
+        self.assertTrue(all(result["ok"] for result in data["results"]))
 
     def test_catalog_cleanup_is_exact_and_updates_revision(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -330,6 +415,10 @@ class SessionCleanerTests(unittest.TestCase):
             html.index("navigator.clipboard?.writeText"),
         )
         self.assertIn('value="older_than_3_months"', html)
+        self.assertIn('value="within_1_day"', html)
+        self.assertIn('value="within_1_week"', html)
+        self.assertIn('value="within_1_month"', html)
+        self.assertIn('id="tagFilter"', html)
         self.assertIn('id="customStart"', html)
         self.assertIn('id="customEnd"', html)
         self.assertIn("managerContext: ''", html)

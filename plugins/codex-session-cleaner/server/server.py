@@ -33,10 +33,24 @@ SOURCE_KINDS = [
 MANAGER_CONTEXT_TTL_SECONDS = 2 * 60 * 60
 DATE_PRESETS = {
     "all",
+    "within_1_day",
+    "within_1_week",
+    "within_1_month",
     "older_than_3_months",
     "older_than_1_month",
     "older_than_1_week",
     "custom",
+}
+TAG_LABELS = {
+    "hidden-fork": "隐藏分叉",
+    "session-management": "会话管理",
+    "automation": "自动化",
+    "plugin-development": "插件开发",
+    "lark": "飞书协作",
+    "documents": "文档表格",
+    "media": "图像视频",
+    "development": "代码开发",
+    "general": "常规任务",
 }
 ROOT = Path(__file__).resolve().parent.parent
 UI_PATH = ROOT / "web" / "manager.html"
@@ -486,6 +500,15 @@ def _timestamp_seconds(value: Any) -> float | None:
     return number / 1000 if number >= 10_000_000_000 else number
 
 
+def _iso_timestamp_seconds(value: Any) -> float | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
 def _months_before(moment: datetime, months: int) -> datetime:
     month_index = moment.year * 12 + moment.month - 1 - months
     year, month_zero = divmod(month_index, 12)
@@ -512,6 +535,12 @@ def _date_filter_bounds(
     current = now or datetime.now()
     if preset == "all":
         return None, None
+    if preset == "within_1_day":
+        return (current - timedelta(days=1)).timestamp(), None
+    if preset == "within_1_week":
+        return (current - timedelta(days=7)).timestamp(), None
+    if preset == "within_1_month":
+        return _months_before(current, 1).timestamp(), None
     if preset == "older_than_3_months":
         return None, _months_before(current, 3).timestamp()
     if preset == "older_than_1_month":
@@ -539,6 +568,158 @@ def _matches_date_filter(item: dict[str, Any], start: float | None, end: float |
     return (start is None or updated_at >= start) and (end is None or updated_at < end)
 
 
+def _state_database() -> Path | None:
+    candidates = (_codex_home() / "state_5.sqlite", _codex_home() / "sqlite" / "state_5.sqlite")
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def _state_thread_metadata(thread_ids: set[str]) -> dict[str, dict[str, Any]]:
+    database = _state_database()
+    if database is None or not thread_ids:
+        return {}
+    connection: sqlite3.Connection | None = None
+    output: dict[str, dict[str, Any]] = {}
+    try:
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=2.0)
+        connection.row_factory = sqlite3.Row
+        ids = sorted(thread_ids)
+        for offset in range(0, len(ids), 500):
+            chunk = ids[offset : offset + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = connection.execute(
+                f"""SELECT id, name, title, preview, cwd, source, thread_source,
+                           created_at, updated_at, archived, git_sha, git_branch,
+                           git_origin_url, has_user_event, tokens_used
+                    FROM threads WHERE id IN ({placeholders})""",
+                chunk,
+            )
+            for row in rows:
+                output[str(row["id"])] = dict(row)
+    except sqlite3.Error:
+        return {}
+    finally:
+        if connection is not None:
+            connection.close()
+    return output
+
+
+def _scan_history_base_threads() -> list[dict[str, Any]]:
+    """Read paginated-history links, including forks hidden from thread/list."""
+    records: dict[str, dict[str, Any]] = {}
+    roots = (
+        (_codex_home() / "sessions", False),
+        (_codex_home() / "archived_sessions", True),
+    )
+    for root, archived in roots:
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*.jsonl"):
+            try:
+                with path.open("r", encoding="utf-8") as handle:
+                    envelope = json.loads(handle.readline())
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(envelope, dict) or envelope.get("type") != "session_meta":
+                continue
+            payload = envelope.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            history_base = payload.get("history_base")
+            if not isinstance(history_base, dict):
+                continue
+            thread_id = str(payload.get("id") or "").strip()
+            base_id = str(history_base.get("thread_id") or "").strip()
+            if not thread_id or not base_id or thread_id == base_id:
+                continue
+            records[thread_id] = {
+                "id": thread_id,
+                "name": "",
+                "preview": "",
+                "cwd": str(payload.get("cwd") or ""),
+                "source": payload.get("source"),
+                "threadSource": payload.get("thread_source"),
+                "createdAt": _iso_timestamp_seconds(payload.get("timestamp")),
+                "updatedAt": _iso_timestamp_seconds(payload.get("timestamp")),
+                "archived": archived,
+                "ephemeral": False,
+                "status": {"type": "notLoaded"},
+                "historyBaseThreadId": base_id,
+                "hiddenFromList": True,
+                "rolloutPath": str(path),
+            }
+
+    state_rows = _state_thread_metadata(set(records))
+    for thread_id, record in records.items():
+        row = state_rows.get(thread_id)
+        if not row:
+            record["name"] = f"隐藏分叉 {thread_id[:8]}"
+            continue
+        record.update(
+            {
+                "name": str(row.get("name") or row.get("title") or "").strip()
+                or f"隐藏分叉 {thread_id[:8]}",
+                "preview": str(row.get("preview") or ""),
+                "cwd": str(row.get("cwd") or record["cwd"]),
+                "source": row.get("source") or record.get("source"),
+                "threadSource": row.get("thread_source") or record.get("threadSource"),
+                "createdAt": row.get("created_at") or record.get("createdAt"),
+                "updatedAt": row.get("updated_at") or record.get("updatedAt"),
+                "archived": bool(row.get("archived")),
+                "gitInfo": {
+                    "sha": row.get("git_sha"),
+                    "branch": row.get("git_branch"),
+                    "originUrl": row.get("git_origin_url"),
+                },
+                "hasUserEvent": bool(row.get("has_user_event")),
+                "tokensUsed": row.get("tokens_used") or 0,
+            }
+        )
+    return list(records.values())
+
+
+def _tag(key: str) -> dict[str, str]:
+    return {"key": key, "label": TAG_LABELS[key]}
+
+
+def _thread_tags(item: dict[str, Any]) -> list[dict[str, str]]:
+    text = " ".join(
+        str(item.get(key) or "")
+        for key in ("title", "preview", "cwd", "projectName", "source")
+    ).lower()
+    tags: list[str] = []
+
+    def add(key: str) -> None:
+        if key not in tags:
+            tags.append(key)
+
+    if item.get("hiddenFromList"):
+        add("hidden-fork")
+    categories = (
+        ("session-management", any(term in text for term in ("会话清理器", "session cleaner", "session-manager", "会话管理"))),
+        ("automation", "automation:" in text or "自动化" in text),
+        ("plugin-development", any(term in text for term in ("codex-plugins", "/plugins/", "plugin", "插件"))),
+        ("lark", any(term in text for term in ("飞书", "feishu", "lark", "多维表格"))),
+        ("documents", any(term in text for term in ("excel", "xlsx", "spreadsheet", "表格", "word", "docx", "文档", "pdf", "ppt", "幻灯片"))),
+        ("media", any(term in text for term in ("image", "图片", "图像", "视频", "video", "remotion", "海报", "视觉"))),
+        ("development", bool(item.get("branch")) or any(term in text for term in ("代码", "修复", "开发", "bug", "git", "github", "code"))),
+    )
+    primary = next((key for key, matched in categories if matched), "general")
+    add(primary)
+    return [_tag(key) for key in tags]
+
+
+def _matches_search_filter(item: dict[str, Any], search: str) -> bool:
+    query = search.strip().lower()
+    if not query:
+        return True
+    values = [
+        item.get("id"), item.get("title"), item.get("preview"), item.get("cwd"),
+        item.get("branch"), item.get("historyBaseThreadId"),
+    ]
+    values.extend(tag.get("label") for tag in item.get("tags", []) if isinstance(tag, dict))
+    return any(query in str(value or "").lower() for value in values)
+
+
 def _normalize_thread(thread: dict[str, Any], archived: bool, current_id: str | None) -> dict[str, Any]:
     cwd = str(thread.get("cwd") or "")
     git = thread.get("gitInfo") if isinstance(thread.get("gitInfo"), dict) else {}
@@ -555,12 +736,14 @@ def _normalize_thread(thread: dict[str, Any], archived: bool, current_id: str | 
         "originUrl": git.get("originUrl"),
         "createdAt": thread.get("createdAt"),
         "updatedAt": thread.get("updatedAt"),
-        "archived": archived,
+        "archived": bool(thread.get("archived", archived)),
         "ephemeral": bool(thread.get("ephemeral")),
         "parentThreadId": _parent_thread_id(thread),
         "status": _status_name(thread.get("status")),
         "source": thread.get("source"),
         "projectId": thread.get("projectId"),
+        "historyBaseThreadId": thread.get("historyBaseThreadId"),
+        "hiddenFromList": bool(thread.get("hiddenFromList")),
         "current": str(thread.get("id") or "") == current_id,
         "protected": str(thread.get("id") or "") == current_id,
     }
@@ -597,6 +780,7 @@ def list_sessions(
     date_preset: str = "all",
     custom_start: str = "",
     custom_end: str = "",
+    tag: str = "",
     now: datetime | None = None,
 ) -> dict[str, Any]:
     date_start, date_end = _date_filter_bounds(
@@ -607,6 +791,26 @@ def list_sessions(
         raw.extend((item, False) for item in _list_one(False, search))
     if scope in ("archived", "all"):
         raw.extend((item, True) for item in _list_one(True, search))
+    history_threads = _scan_history_base_threads()
+    history_by_id = {str(item.get("id") or ""): item for item in history_threads}
+    visible_ids = {str(item.get("id") or "") for item, _ in raw}
+    for index, (thread, archived) in enumerate(raw):
+        thread_id = str(thread.get("id") or "")
+        history = history_by_id.get(thread_id)
+        if history:
+            annotated = dict(thread)
+            annotated["historyBaseThreadId"] = history.get("historyBaseThreadId")
+            raw[index] = (annotated, archived)
+    for history in history_threads:
+        thread_id = str(history.get("id") or "")
+        archived = bool(history.get("archived"))
+        if thread_id in visible_ids:
+            continue
+        if scope == "active" and archived:
+            continue
+        if scope == "archived" and not archived:
+            continue
+        raw.append((history, archived))
     children: dict[str, list[str]] = {}
     for thread, _ in raw:
         parent = _parent_thread_id(thread)
@@ -625,16 +829,36 @@ def list_sessions(
             stack.extend(children.get(item, []))
         return len(seen)
 
+    blockers: dict[str, list[str]] = {}
+    for history in history_threads:
+        base_id = str(history.get("historyBaseThreadId") or "")
+        referrer_id = str(history.get("id") or "")
+        if base_id and referrer_id:
+            blockers.setdefault(base_id, []).append(referrer_id)
+
     normalized = []
     for thread, archived in raw:
-        if _is_derived_thread(thread):
+        if _is_derived_thread(thread) and not thread.get("hiddenFromList"):
             continue
         item = _normalize_thread(thread, archived, current_id)
-        if item["id"] and _matches_date_filter(item, date_start, date_end):
+        item["tags"] = _thread_tags(item)
+        item["blockingForkIds"] = sorted(set(blockers.get(item["id"], [])))
+        item["blockingForkCount"] = len(item["blockingForkIds"])
+        matches_tag = not tag or any(entry["key"] == tag for entry in item["tags"])
+        if (
+            item["id"]
+            and _matches_date_filter(item, date_start, date_end)
+            and _matches_search_filter(item, search)
+            and matches_tag
+        ):
             item["descendantCount"] = descendants(item["id"])
             item["deletable"] = bool(current_id) and not item["current"] and not item["protected"] and not item["ephemeral"]
             normalized.append(item)
-    normalized.sort(key=lambda x: x.get("updatedAt") or 0, reverse=True)
+    normalized.sort(key=lambda x: _timestamp_seconds(x.get("updatedAt")) or 0, reverse=True)
+    tag_counts: dict[str, int] = {}
+    for item in normalized:
+        for entry in item["tags"]:
+            tag_counts[entry["key"]] = tag_counts.get(entry["key"], 0) + 1
     return {
         "sessions": normalized,
         "total": len(normalized),
@@ -642,6 +866,12 @@ def list_sessions(
         "currentThreadId": current_id,
         "scope": scope,
         "search": search,
+        "tagFilter": tag,
+        "availableTags": [
+            {"key": key, "label": TAG_LABELS[key], "count": tag_counts[key]}
+            for key in TAG_LABELS
+            if key in tag_counts
+        ],
         "dateFilter": {
             "preset": date_preset,
             "customStart": custom_start,
@@ -736,6 +966,39 @@ def archive_sessions(ids: list[str], current_id: str | None) -> dict[str, Any]:
     return {"operation": "archive", "results": results}
 
 
+def _history_reference_map(history_threads: list[dict[str, Any]]) -> dict[str, list[str]]:
+    references: dict[str, list[str]] = {}
+    for thread in history_threads:
+        thread_id = str(thread.get("id") or "")
+        base_id = str(thread.get("historyBaseThreadId") or "")
+        if thread_id and base_id:
+            references.setdefault(base_id, []).append(thread_id)
+    return references
+
+
+def _delete_order(ids: list[str], history_threads: list[dict[str, Any]]) -> list[str]:
+    """Order selected history referrers before the source threads they depend on."""
+    selected = set(ids)
+    edges: dict[str, set[str]] = {thread_id: set() for thread_id in ids}
+    indegree: dict[str, int] = {thread_id: 0 for thread_id in ids}
+    for thread in history_threads:
+        referrer = str(thread.get("id") or "")
+        base = str(thread.get("historyBaseThreadId") or "")
+        if referrer in selected and base in selected and base not in edges[referrer]:
+            edges[referrer].add(base)
+            indegree[base] += 1
+    pending = [thread_id for thread_id in ids if indegree[thread_id] == 0]
+    ordered: list[str] = []
+    while pending:
+        thread_id = pending.pop(0)
+        ordered.append(thread_id)
+        for dependent in edges[thread_id]:
+            indegree[dependent] -= 1
+            if indegree[dependent] == 0:
+                pending.append(dependent)
+    return ordered + [thread_id for thread_id in ids if thread_id not in ordered]
+
+
 def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -> dict[str, Any]:
     if confirmation != "永久删除":
         raise ValueError("确认词不正确，必须输入“永久删除”。")
@@ -751,9 +1014,36 @@ def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -
         raise ValueError("部分会话已不存在或不是顶层会话，请刷新后重试：" + ", ".join(unavailable))
     if unsafe:
         raise ValueError("部分会话不可删除：" + ", ".join(unsafe))
+    history_threads = _scan_history_base_threads()
+    references = _history_reference_map(history_threads)
+    selected = set(ids)
+    blockers = {
+        thread_id: sorted(referrer for referrer in references.get(thread_id, []) if referrer not in selected)
+        for thread_id in ids
+    }
     results = []
     deleted_ids = []
-    for thread_id in ids:
+    operation_order = _delete_order(ids, history_threads)
+    for thread_id in operation_order:
+        if blockers[thread_id]:
+            descriptions = []
+            for blocker_id in blockers[thread_id][:3]:
+                blocker = by_id.get(blocker_id, {})
+                title = str(blocker.get("title") or "隐藏分叉")
+                marker = "（当前会话）" if blocker_id == current_id else ""
+                descriptions.append(f"{title} [{blocker_id}]{marker}")
+            suffix = "；另有更多阻塞分叉" if len(blockers[thread_id]) > 3 else ""
+            results.append(
+                {
+                    "threadId": thread_id,
+                    "ok": False,
+                    "error": "仍被分叉历史引用，请先选择并删除阻塞分叉："
+                    + "、".join(descriptions)
+                    + suffix,
+                    "blockingThreadIds": blockers[thread_id],
+                }
+            )
+            continue
         try:
             APP.request("thread/delete", {"threadId": thread_id})
             deleted_ids.append(thread_id)
@@ -762,7 +1052,12 @@ def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -
             results.append({"threadId": thread_id, "ok": False, "error": str(exc)})
     cwd_by_id = {thread_id: str(by_id[thread_id].get("cwd") or "") for thread_id in deleted_ids}
     sidebar_sync = sync_desktop_sidebar(deleted_ids, cwd_by_id)
-    return {"operation": "delete", "results": results, "sidebarSync": sidebar_sync}
+    return {
+        "operation": "delete",
+        "operationOrder": operation_order,
+        "results": results,
+        "sidebarSync": sidebar_sync,
+    }
 
 
 def _tool_definitions() -> list[dict[str, Any]]:
@@ -779,7 +1074,7 @@ def _tool_definitions() -> list[dict[str, Any]]:
         {
             "name": "list_sessions",
             "title": "列出 Codex 会话",
-            "description": "按活动/归档状态、搜索词和最后更新时间列出会话。",
+            "description": "按活动/归档状态、搜索词、类别标签和最后更新时间列出会话。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -787,9 +1082,13 @@ def _tool_definitions() -> list[dict[str, Any]]:
                     "search": {"type": "string", "default": ""},
                     "datePreset": {
                         "type": "string",
-                        "enum": ["all", "older_than_3_months", "older_than_1_month", "older_than_1_week", "custom"],
+                        "enum": [
+                            "all", "within_1_day", "within_1_week", "within_1_month",
+                            "older_than_3_months", "older_than_1_month", "older_than_1_week", "custom",
+                        ],
                         "default": "all",
                     },
+                    "tag": {"type": "string", "default": ""},
                     "customStart": {"type": "string", "default": ""},
                     "customEnd": {"type": "string", "default": ""},
                     "managerContext": {"type": "string", "description": "管理页内部上下文令牌。"},
@@ -853,7 +1152,7 @@ def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]
         data = list_sessions(current_id, "all", "")
         if manager_context:
             data["managerContext"] = manager_context
-        return _text_result(data, f"已列出 {data['total']} 个顶层 Codex 会话。")
+        return _text_result(data, f"已列出 {data['total']} 个可管理 Codex 会话。")
     if name == "list_sessions":
         current_id, manager_context = _current_id_for_call(meta, arguments)
         scope = str(arguments.get("scope") or "all")
@@ -866,10 +1165,11 @@ def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]
             str(arguments.get("datePreset") or "all"),
             str(arguments.get("customStart") or ""),
             str(arguments.get("customEnd") or ""),
+            str(arguments.get("tag") or ""),
         )
         if manager_context:
             data["managerContext"] = manager_context
-        return _text_result(data, f"已列出 {data['total']} 个顶层 Codex 会话。")
+        return _text_result(data, f"已列出 {data['total']} 个可管理 Codex 会话。")
     if name == "inspect_session_files":
         thread_id = str(arguments.get("threadId") or "").strip()
         if not thread_id:
