@@ -16,7 +16,7 @@
     h1 { font-size:25px; letter-spacing:-.02em; margin:0 0 4px; }
     .subtitle,.muted { color:var(--muted); }
     .shield { border:1px solid var(--line); background:var(--panel); padding:7px 10px; border-radius:999px; white-space:nowrap; }
-    .toolbar { position:sticky; top:0; z-index:3; display:grid; grid-template-columns:minmax(160px,1fr) auto auto auto; gap:10px; padding:12px; border:1px solid var(--line); border-radius:16px; background:var(--panel); backdrop-filter:blur(18px); box-shadow:var(--shadow); }
+    .toolbar { position:sticky; top:0; z-index:3; display:grid; grid-template-columns:minmax(160px,1fr) auto auto auto; gap:10px; margin-bottom:10px; padding:12px; border:1px solid var(--line); border-radius:16px; background:var(--panel); backdrop-filter:blur(18px); box-shadow:var(--shadow); }
     .search,.date-select,.date-input { border:1px solid var(--line); background:transparent; color:var(--text); border-radius:10px; padding:9px 11px; outline:none; }
     .search:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(22,119,255,.13); }
     .segments { display:flex; padding:3px; border:1px solid var(--line); border-radius:11px; }
@@ -30,7 +30,7 @@
     .btn:hover:not(:disabled) { border-color:rgba(22,119,255,.5); }
     .btn:disabled { opacity:.42; cursor:not-allowed; }
     .btn.danger { color:var(--danger); border-color:rgba(217,45,32,.3); background:var(--danger-bg); }
-    .summary { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:16px 3px 9px; }
+    .summary { grid-column:1 / -1; display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0; padding-top:10px; border-top:1px solid var(--line); }
     .actions { display:flex; gap:8px; align-items:center; }
     .list { display:grid; gap:10px; }
     .card { display:grid; grid-template-columns:auto minmax(0,1fr) auto; gap:12px; align-items:flex-start; padding:15px; border:1px solid var(--line); border-radius:15px; background:var(--panel); box-shadow:0 5px 18px rgba(20,25,34,.04); }
@@ -88,14 +88,14 @@
         <span>至</span>
         <input id="customEnd" class="date-input" type="date" aria-label="结束日期">
       </div>
-    </section>
-    <div class="summary">
-      <div><span id="count">正在读取…</span> <span id="selection" class="muted"></span></div>
-      <div class="actions">
-        <button id="archive" class="btn" disabled>归档所选</button>
-        <button id="delete" class="btn danger" disabled>永久删除所选</button>
+      <div class="summary">
+        <div><span id="count">正在读取…</span> <span id="selection" class="muted"></span></div>
+        <div class="actions">
+          <button id="archive" class="btn" disabled>归档所选</button>
+          <button id="delete" class="btn danger" disabled>永久删除所选</button>
+        </div>
       </div>
-    </div>
+    </section>
     <section id="list" class="list" aria-live="polite"></section>
     <div class="notice">删除会话不会删除项目文件。文件列表只是从会话记录提取的修改/引用线索；共享插件缓存、模型缓存、认证信息和全局配置不在本插件清理范围内。</div>
   </main>

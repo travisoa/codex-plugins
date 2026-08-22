@@ -265,6 +265,16 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertIn("color:#17191d", html)
         self.assertIn("background:#fff", html)
 
+    def test_selection_actions_stay_inside_sticky_toolbar(self):
+        html = server.UI_PATH.read_text(encoding="utf-8")
+        toolbar_start = html.index('<section class="toolbar"')
+        summary = html.index('<div class="summary">')
+        toolbar_end = html.index("</section>", toolbar_start)
+        self.assertLess(toolbar_start, summary)
+        self.assertLess(summary, toolbar_end)
+        self.assertIn(".toolbar { position:sticky", html)
+        self.assertIn(".summary { grid-column:1 / -1", html)
+
 
 if __name__ == "__main__":
     unittest.main()
