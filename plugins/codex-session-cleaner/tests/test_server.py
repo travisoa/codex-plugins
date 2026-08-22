@@ -647,24 +647,28 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertIn("共 80 个可管理 Codex 会话", body)
         self.assertIn("另有 50 个会话未列出", body)
 
-    def test_text_fallback_mentions_the_tui_only_for_hosts_without_ui(self):
+    def test_text_fallback_points_each_host_at_the_right_affordance(self):
         server.APP = FakeApp(active=[{"id": "t", "name": "n", "cwd": "/tmp", "updatedAt": 1}])
-        server.handle({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {"capabilities": {"elicitation": {"form": {}}}},
-        })
-        self.assertIn(
-            "launch_tui.sh",
-            server.call_tool("list_sessions", {}, {"threadId": "m"})["content"][0]["text"],
-        )
-        server.handle({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {"capabilities": {"ui": {}}},
-        })
-        self.assertNotIn(
-            "launch_tui.sh",
-            server.call_tool("list_sessions", {}, {"threadId": "m"})["content"][0]["text"],
-        )
+
+        def body(capabilities):
+            server.handle({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"capabilities": capabilities},
+            })
+            return server.call_tool("list_sessions", {}, {"threadId": "m"})["content"][0]["text"]
+
+        # 能弹表单的宿主应被引导去交互式勾选，而不是另开一个 TUI。
+        with_elicitation = body({"elicitation": {"form": {}}})
+        self.assertIn("交互式筛选与勾选", with_elicitation)
+        self.assertNotIn("launch_tui.sh", with_elicitation)
+
+        # 两种能力都没有的宿主才建议用终端界面。
+        self.assertIn("launch_tui.sh", body({"tools": {}}))
+
+        # 能渲染管理页的宿主不需要任何额外提示。
+        rendered = body({"ui": {}})
+        self.assertNotIn("launch_tui.sh", rendered)
+        self.assertNotIn("交互式筛选与勾选", rendered)
 
     def test_operation_text_reports_each_failure(self):
         server._HOST.clear()
@@ -790,6 +794,110 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertIn(".summary { grid-column:1 / -1", html)
         self.assertIn("padding:8px 9px", html)
         self.assertIn("padding-top:6px", html)
+
+
+class InteractivePickerTests(unittest.TestCase):
+    """CLI 类宿主上，open_session_manager 走筛选 + 勾选两步交互。"""
+
+    CLI = {"elicitation": {"form": {}, "url": {}}}
+
+    def setUp(self):
+        self.original_app = server.APP
+        self.original_request = server.HOST.request
+        self.original_scan = server._scan_history_base_threads
+        server._scan_history_base_threads = lambda: []
+        server._MANAGER_CONTEXTS.clear()
+        server._HOST.clear()
+        self.prompts = []
+
+    def tearDown(self):
+        server.APP = self.original_app
+        server.HOST.request = self.original_request
+        server._scan_history_base_threads = self.original_scan
+        server._MANAGER_CONTEXTS.clear()
+        server._HOST.clear()
+
+    def host(self, count, capabilities=None):
+        server.APP = FakeApp(active=[
+            {"id": f"t-{index}", "name": f"会话 {index}", "cwd": f"/tmp/p{index}",
+             "source": "vscode", "updatedAt": 1787411471 - index}
+            for index in range(count)
+        ])
+        server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"capabilities": capabilities or self.CLI},
+        })
+
+    def answers(self, *responses):
+        queue = list(responses)
+        def fake_request(method, params, timeout=120.0):
+            self.prompts.append(params)
+            return queue.pop(0)
+        server.HOST.request = fake_request
+
+    def open(self):
+        return server.call_tool("open_session_manager", {}, {"threadId": "manager"})
+
+    def test_filter_then_pick_returns_the_chosen_sessions(self):
+        self.host(5)
+        self.answers(
+            {"action": "accept", "content": {"scope": "all", "datePreset": "all", "tag": ""}},
+            {"action": "accept", "content": {"t-1": True, "t-3": True}},
+        )
+        result = self.open()
+        outcome = result["structuredContent"]["interactive"]
+        self.assertEqual(outcome["selectedThreadIds"], ["t-1", "t-3"])
+        self.assertIn("用户勾选了 2 个会话", result["content"][0]["text"])
+        # 第一张表单收筛选条件，第二张逐条勾选。
+        self.assertEqual(
+            list(self.prompts[0]["requestedSchema"]["properties"]),
+            ["scope", "datePreset", "tag"],
+        )
+        self.assertTrue(
+            all(field["type"] == "boolean"
+                for field in self.prompts[1]["requestedSchema"]["properties"].values())
+        )
+
+    def test_filter_form_offers_the_tags_actually_present(self):
+        self.host(3)
+        self.answers({"action": "accept", "content": {"scope": "all", "datePreset": "all", "tag": ""}},
+                     {"action": "accept", "content": {}})
+        self.open()
+        tag_field = self.prompts[0]["requestedSchema"]["properties"]["tag"]
+        self.assertEqual(tag_field["enum"][0], "")
+        self.assertEqual(tag_field["enumNames"][0], "不限")
+        self.assertGreater(len(tag_field["enum"]), 1)
+
+    def test_too_many_matches_ask_for_a_narrower_filter_instead_of_prompting(self):
+        self.host(20)
+        self.answers({"action": "accept", "content": {"scope": "all", "datePreset": "all", "tag": ""}})
+        result = self.open()
+        outcome = result["structuredContent"]["interactive"]
+        self.assertNotIn("selectedThreadIds", outcome)
+        self.assertIn("超过一次勾选上限", outcome["note"])
+        self.assertEqual(len(self.prompts), 1)  # 没有弹出无法使用的勾选表单
+
+    def test_cancelling_the_filter_falls_back_to_the_text_listing(self):
+        self.host(3)
+        self.answers({"action": "decline"})
+        result = self.open()
+        self.assertNotIn("interactive", result["structuredContent"])
+        self.assertIn("共 3 个可管理 Codex 会话", result["content"][0]["text"])
+
+    def test_picking_nothing_changes_nothing(self):
+        self.host(3)
+        self.answers({"action": "accept", "content": {"scope": "all", "datePreset": "all", "tag": ""}},
+                     {"action": "accept", "content": {}})
+        outcome = self.open()["structuredContent"]["interactive"]
+        self.assertNotIn("selectedThreadIds", outcome)
+        self.assertIn("没有勾选", outcome["note"])
+
+    def test_hosts_with_a_manager_page_keep_the_component_flow(self):
+        self.host(3, capabilities={"ui": {}, "elicitation": {"form": {}}})
+        self.answers({"action": "decline"})
+        result = self.open()
+        self.assertEqual(self.prompts, [])
+        self.assertNotIn("interactive", result["structuredContent"])
 
 
 class ElicitationConfirmTests(unittest.TestCase):

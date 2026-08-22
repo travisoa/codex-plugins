@@ -1284,6 +1284,157 @@ def _confirm_delete_targets(
     return ids, None
 
 
+DATE_PRESET_LABELS = {
+    "all": "不限",
+    "within_1_day": "1 天内",
+    "within_1_week": "1 周内",
+    "within_1_month": "1 个月内",
+    "older_than_1_week": "1 周前（更早）",
+    "older_than_1_month": "1 个月前（更早）",
+    "older_than_3_months": "3 个月前（更早）",
+}
+
+
+def _elicit_filter(available_tags: list[dict[str, Any]], total: int) -> dict[str, str] | None:
+    """第一段：先把上百个会话收窄到能逐条勾选的规模。"""
+    tag_keys = [""] + [str(tag.get("key")) for tag in available_tags]
+    tag_names = ["不限"] + [
+        f"{tag.get('label')}（{tag.get('count')}）" for tag in available_tags
+    ]
+    params = {
+        "message": f"共 {total} 个可管理会话。请先选择筛选条件，随后从结果中勾选要处理的会话。",
+        "requestedSchema": {
+            "type": "object",
+            "properties": {
+                "scope": {
+                    "type": "string",
+                    "title": "会话范围",
+                    "enum": ["all", "active", "archived"],
+                    "enumNames": ["全部", "当前", "已归档"],
+                    "default": "all",
+                },
+                "datePreset": {
+                    "type": "string",
+                    "title": "最后更新时间",
+                    "enum": list(DATE_PRESET_LABELS),
+                    "enumNames": list(DATE_PRESET_LABELS.values()),
+                    "default": "all",
+                },
+                "tag": {
+                    "type": "string",
+                    "title": "类别标签",
+                    "enum": tag_keys,
+                    "enumNames": tag_names,
+                    "default": "",
+                },
+            },
+        },
+    }
+    try:
+        result = HOST.request("elicitation/create", params, timeout=120.0)
+    except Exception:
+        return None
+    result = result if isinstance(result, dict) else {}
+    if str(result.get("action") or "") != "accept":
+        return None
+    content = result.get("content")
+    content = content if isinstance(content, dict) else {}
+    scope = str(content.get("scope") or "all")
+    date_preset = str(content.get("datePreset") or "all")
+    tag = str(content.get("tag") or "")
+    return {
+        "scope": scope if scope in ("all", "active", "archived") else "all",
+        "datePreset": date_preset if date_preset in DATE_PRESET_LABELS else "all",
+        "tag": tag,
+    }
+
+
+def _elicit_pick(sessions: list[dict[str, Any]]) -> list[str] | None:
+    """第二段：逐条勾选。None 表示用户取消。"""
+    properties: dict[str, Any] = {}
+    for item in sessions:
+        title, detail = _elicit_target_labels(item["id"], item)
+        properties[item["id"]] = {
+            "type": "boolean",
+            "title": title,
+            "description": detail,
+            "default": False,
+        }
+    params = {
+        "message": f"筛选到 {len(sessions)} 个会话，请把要处理的选为 True（此步只做选择，不会归档或删除）。",
+        "requestedSchema": {"type": "object", "properties": properties},
+    }
+    try:
+        result = HOST.request("elicitation/create", params, timeout=120.0)
+    except Exception:
+        return None
+    result = result if isinstance(result, dict) else {}
+    if str(result.get("action") or "") != "accept":
+        return None
+    content = result.get("content")
+    content = content if isinstance(content, dict) else {}
+    return [item["id"] for item in sessions if content.get(item["id"]) is True]
+
+
+def _interactive_pick(current_id: str | None, data: dict[str, Any]) -> dict[str, Any] | None:
+    """CLI 类宿主上把“打开管理页”变成筛选 + 勾选两步交互。"""
+    if not _should_elicit():
+        return None
+    sessions = data.get("sessions") or []
+    chosen = _elicit_filter(data.get("availableTags") or [], len(sessions))
+    if chosen is None:
+        return None
+
+    filtered = list_sessions(
+        current_id, chosen["scope"], "", chosen["datePreset"], "", "", chosen["tag"]
+    )
+    outcome: dict[str, Any] = {"filter": chosen, "matched": filtered["total"]}
+    candidates = [item for item in filtered["sessions"] if item.get("deletable")]
+    if not filtered["sessions"]:
+        outcome["note"] = "该筛选条件下没有会话，请换个条件重试。"
+        return {"data": filtered, "outcome": outcome}
+    if len(candidates) > ELICIT_FIELD_LIMIT:
+        outcome["note"] = (
+            f"筛选后仍有 {len(candidates)} 个可操作会话，超过一次勾选上限 {ELICIT_FIELD_LIMIT} 个；"
+            "请缩小时间范围或指定标签后重新打开。"
+        )
+        return {"data": filtered, "outcome": outcome}
+
+    picked = _elicit_pick(candidates)
+    if picked is None:
+        outcome["note"] = "你已取消选择，未做任何改动。"
+    elif not picked:
+        outcome["note"] = "没有勾选任何会话，未做任何改动。"
+    else:
+        outcome["selectedThreadIds"] = picked
+        outcome["note"] = (
+            f"用户已勾选 {len(picked)} 个会话。请询问要归档还是永久删除，"
+            "并且只对这些会话执行，不要自行扩大范围。"
+        )
+    return {"data": filtered, "outcome": outcome}
+
+
+def _interactive_text(data: dict[str, Any], outcome: dict[str, Any]) -> str:
+    chosen = outcome.get("filter") or {}
+    lines = [
+        "已在交互界面完成筛选。",
+        f"筛选条件：范围 {chosen.get('scope')} · 时间 {DATE_PRESET_LABELS.get(chosen.get('datePreset'), '不限')}"
+        + (f" · 标签 {chosen.get('tag')}" if chosen.get("tag") else ""),
+        f"匹配 {outcome.get('matched', 0)} 个会话。",
+        "",
+    ]
+    selected = outcome.get("selectedThreadIds") or []
+    if selected:
+        by_id = {item["id"]: item for item in data.get("sessions") or []}
+        lines.append(f"用户勾选了 {len(selected)} 个会话：")
+        for index, thread_id in enumerate(selected, start=1):
+            item = by_id.get(thread_id, {})
+            lines.append(f"  {index}. {item.get('title') or thread_id}")
+            lines.append(f"     ID {thread_id} · {item.get('cwd') or ''}")
+    lines.append(outcome.get("note") or "")
+    return "\n".join(line for line in lines if line is not None)
+
+
 def _tool_definitions() -> list[dict[str, Any]]:
     ui_meta = {"ui": {"resourceUri": RESOURCE_URI}, "openai/outputTemplate": RESOURCE_URI}
     return [
@@ -1392,8 +1543,10 @@ def _host_renders_ui() -> bool | None:
 def _tui_hint() -> str:
     if _host_renders_ui() is not False:
         return ""
+    if _host_supports_elicitation():
+        return "\n\n如需勾选式批量操作，可再次调用 open_session_manager 进入交互式筛选与勾选。"
     return (
-        "\n\n当前客户端未声明组件渲染能力，已改用文本列表。"
+        "\n\n当前客户端既不能渲染管理页组件，也不支持交互表单。"
         "需要勾选式批量操作时，可在终端运行插件目录下的 scripts/launch_tui.sh。"
     )
 
@@ -1489,6 +1642,13 @@ def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]
             data["locale"] = locale
         if manager_context:
             data["managerContext"] = manager_context
+        interactive = _interactive_pick(current_id, data)
+        if interactive is not None:
+            payload = interactive["data"]
+            payload["interactive"] = interactive["outcome"]
+            if manager_context:
+                payload["managerContext"] = manager_context
+            return _text_result(payload, _interactive_text(payload, interactive["outcome"]))
         return _text_result(data, _sessions_text(data))
     if name == "list_sessions":
         current_id, manager_context = _current_id_for_call(meta, arguments)
