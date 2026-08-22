@@ -30,49 +30,16 @@
 
 本项目须通过 Codex marketplace 安装。marketplace 来源支持本地目录、Git 仓库及 HTTPS/SSH Git 地址。
 
-### 1. 准备本地 marketplace
-
-将本仓库置于 marketplace 目录：
-
-```text
-local-codex-marketplace/
-├── .agents/
-│   └── plugins/
-│       └── marketplace.json
-└── plugins/
-    └── codex-session-cleaner/   # 本仓库
-```
-
-在 `local-codex-marketplace/.agents/plugins/marketplace.json` 中注册插件：
-
-```json
-{
-  "name": "local-tools",
-  "interface": {
-    "displayName": "Local Tools"
-  },
-  "plugins": [
-    {
-      "name": "codex-session-cleaner",
-      "source": {
-        "source": "local",
-        "path": "./plugins/codex-session-cleaner"
-      },
-      "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
-      },
-      "category": "Productivity"
-    }
-  ]
-}
-```
-
-### 2. 注册 marketplace 并安装插件
+### 1. 注册远程 marketplace
 
 ```bash
-codex plugin marketplace add /path/to/local-codex-marketplace
-codex plugin add codex-session-cleaner@local-tools
+codex plugin marketplace add travisoa/codex-session-cleaner --ref main
+```
+
+### 2. 安装插件
+
+```bash
+codex plugin add codex-session-cleaner@codex-session-cleaner
 ```
 
 验证安装状态：
@@ -81,7 +48,7 @@ codex plugin add codex-session-cleaner@local-tools
 codex plugin list
 ```
 
-列表中应显示 `codex-session-cleaner@local-tools` 的状态为 `installed, enabled`。安装后新建 Codex 任务以加载技能和 MCP 工具。
+列表中应显示 `codex-session-cleaner@codex-session-cleaner` 的状态为 `installed, enabled`，来源为 Git marketplace。安装后新建 Codex 任务以加载技能和 MCP 工具。
 
 也可在 Codex CLI 中输入 `/plugins`，从已配置的 marketplace 中安装插件。
 
@@ -127,10 +94,17 @@ codex plugin list
 ## 卸载
 
 ```bash
-codex plugin remove codex-session-cleaner@local-tools
+codex plugin remove codex-session-cleaner@codex-session-cleaner
 ```
 
 ## 本地开发
+
+本地调试时，可将仓库目录直接注册为 marketplace：
+
+```bash
+codex plugin marketplace add /path/to/codex-session-cleaner
+codex plugin add codex-session-cleaner@codex-session-cleaner
+```
 
 测试与语法检查：
 
