@@ -9,10 +9,15 @@ import os
 import queue
 import select
 import shutil
+import socket
+import sqlite3
+import stat
+import struct
 import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -154,6 +159,188 @@ class AppServerClient:
 APP = AppServerClient()
 atexit.register(APP.close)
 PROTECTED_THREAD_IDS: set[str] = set()
+
+
+def _codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+
+
+def _remove_from_desktop_catalog(thread_ids: list[str]) -> dict[str, Any]:
+    """Remove exact, already-deleted thread IDs from the desktop sidebar catalog."""
+    database = _codex_home() / "sqlite" / "codex-dev.db"
+    result: dict[str, Any] = {
+        "available": database.is_file(),
+        "removedThreadIds": [],
+        "error": None,
+    }
+    if not database.is_file() or not thread_ids:
+        return result
+
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(database, timeout=2.0)
+        connection.execute("PRAGMA busy_timeout = 2000")
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        required_tables = {
+            "local_thread_catalog",
+            "local_thread_catalog_sync_state",
+            "local_thread_catalog_metadata",
+        }
+        if not required_tables.issubset(tables):
+            raise RuntimeError("桌面会话目录结构不兼容，已跳过侧边栏同步。")
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(local_thread_catalog)")
+        }
+        if not {"host_id", "thread_id", "missing_candidate"}.issubset(columns):
+            raise RuntimeError("桌面会话目录字段不兼容，已跳过侧边栏同步。")
+
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """UPDATE local_thread_catalog_sync_state
+               SET observation_sequence = observation_sequence + 1
+               WHERE host_id = ?""",
+            ("local",),
+        )
+        visible_removed = []
+        for thread_id in thread_ids:
+            row = connection.execute(
+                """DELETE FROM local_thread_catalog
+                   WHERE host_id = ? AND thread_id = ?
+                   RETURNING missing_candidate""",
+                ("local", thread_id),
+            ).fetchone()
+            if row is not None:
+                result["removedThreadIds"].append(thread_id)
+                if row[0] == 0:
+                    visible_removed.append(thread_id)
+        if visible_removed:
+            connection.execute(
+                """UPDATE local_thread_catalog_metadata
+                   SET catalog_revision = catalog_revision + 1
+                   WHERE id = 1"""
+            )
+        connection.commit()
+    except Exception as exc:
+        if connection is not None:
+            try:
+                connection.rollback()
+            except sqlite3.Error:
+                pass
+        result["error"] = str(exc)
+    finally:
+        if connection is not None:
+            connection.close()
+    return result
+
+
+def _read_ipc_frame(stream: socket.socket, timeout: float = 2.0) -> dict[str, Any]:
+    stream.settimeout(timeout)
+
+    def receive_exact(length: int) -> bytes:
+        chunks = bytearray()
+        while len(chunks) < length:
+            chunk = stream.recv(length - len(chunks))
+            if not chunk:
+                raise RuntimeError("Codex 桌面 IPC 已断开。")
+            chunks.extend(chunk)
+        return bytes(chunks)
+
+    length = struct.unpack("<I", receive_exact(4))[0]
+    if length <= 0 or length > 256 * 1024 * 1024:
+        raise RuntimeError("Codex 桌面 IPC 返回了无效数据帧。")
+    message = json.loads(receive_exact(length).decode("utf-8"))
+    if not isinstance(message, dict):
+        raise RuntimeError("Codex 桌面 IPC 返回格式无效。")
+    return message
+
+
+def _write_ipc_frame(stream: socket.socket, message: dict[str, Any]) -> None:
+    payload = json.dumps(message, ensure_ascii=False).encode("utf-8")
+    stream.sendall(struct.pack("<I", len(payload)) + payload)
+
+
+def _notify_desktop_sidebar(thread_ids: list[str], cwd_by_id: dict[str, str]) -> dict[str, Any]:
+    """Notify the running desktop windows after catalog rows are removed."""
+    endpoint = _codex_home() / "ipc" / "ipc.sock"
+    result: dict[str, Any] = {
+        "available": endpoint.exists(),
+        "notifiedThreadIds": [],
+        "error": None,
+    }
+    if not endpoint.exists() or not thread_ids:
+        return result
+    try:
+        endpoint_stat = endpoint.stat()
+        parent_stat = endpoint.parent.stat()
+        if (
+            not stat.S_ISSOCK(endpoint_stat.st_mode)
+            or endpoint_stat.st_uid != os.getuid()
+            or parent_stat.st_uid != os.getuid()
+            or parent_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            raise RuntimeError("Codex 桌面 IPC 所有权或权限不安全，已拒绝连接。")
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
+            stream.settimeout(2.0)
+            stream.connect(str(endpoint))
+            request_id = str(uuid.uuid4())
+            _write_ipc_frame(
+                stream,
+                {
+                    "type": "request",
+                    "requestId": request_id,
+                    "sourceClientId": "initializing-client",
+                    "version": 0,
+                    "method": "initialize",
+                    "params": {"clientType": "codex-session-cleaner"},
+                    "timeoutMs": 2000,
+                },
+            )
+            response = _read_ipc_frame(stream)
+            while response.get("type") != "response" or response.get("requestId") != request_id:
+                response = _read_ipc_frame(stream)
+            if response.get("resultType") != "success":
+                raise RuntimeError("Codex 桌面 IPC 初始化失败。")
+            client_id = str((response.get("result") or {}).get("clientId") or "")
+            if not client_id:
+                raise RuntimeError("Codex 桌面 IPC 未返回客户端 ID。")
+            for thread_id in thread_ids:
+                _write_ipc_frame(
+                    stream,
+                    {
+                        "type": "broadcast",
+                        "method": "thread-archived",
+                        "sourceClientId": client_id,
+                        "version": 2,
+                        "params": {
+                            "hostId": "local",
+                            "conversationId": thread_id,
+                            "cwd": cwd_by_id.get(thread_id, ""),
+                        },
+                    },
+                )
+                result["notifiedThreadIds"].append(thread_id)
+    except Exception as exc:
+        result["error"] = str(exc)
+    return result
+
+
+def sync_desktop_sidebar(thread_ids: list[str], cwd_by_id: dict[str, str]) -> dict[str, Any]:
+    catalog = _remove_from_desktop_catalog(thread_ids)
+    notification = _notify_desktop_sidebar(thread_ids, cwd_by_id)
+    errors = [item for item in (catalog.get("error"), notification.get("error")) if item]
+    return {
+        "ok": not errors,
+        "catalog": catalog,
+        "notification": notification,
+        "warnings": errors,
+    }
 
 
 def _thread_id_from_meta(meta: Any) -> str | None:
@@ -383,13 +570,17 @@ def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -
     if unsafe:
         raise ValueError("部分会话不可删除：" + ", ".join(unsafe))
     results = []
+    deleted_ids = []
     for thread_id in ids:
         try:
             APP.request("thread/delete", {"threadId": thread_id})
+            deleted_ids.append(thread_id)
             results.append({"threadId": thread_id, "ok": True})
         except Exception as exc:
             results.append({"threadId": thread_id, "ok": False, "error": str(exc)})
-    return {"operation": "delete", "results": results}
+    cwd_by_id = {thread_id: str(by_id[thread_id].get("cwd") or "") for thread_id in deleted_ids}
+    sidebar_sync = sync_desktop_sidebar(deleted_ids, cwd_by_id)
+    return {"operation": "delete", "results": results, "sidebarSync": sidebar_sync}
 
 
 def _tool_definitions() -> list[dict[str, Any]]:
@@ -484,7 +675,10 @@ def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]
             str(arguments.get("confirmation") or ""),
             current_id,
         )
-        return _text_result(data, "永久删除操作已完成。")
+        summary = "永久删除操作已完成。"
+        if not data["sidebarSync"]["ok"]:
+            summary += " 侧边栏同步未完全成功；请刷新或重启 Codex。"
+        return _text_result(data, summary)
     raise ValueError(f"未知工具：{name}")
 
 

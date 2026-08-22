@@ -1,6 +1,9 @@
 import importlib.util
 import json
+import os
+import sqlite3
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -34,10 +37,18 @@ class FakeApp:
 class SessionCleanerTests(unittest.TestCase):
     def setUp(self):
         self.original_app = server.APP
+        self.original_sync = server.sync_desktop_sidebar
+        server.sync_desktop_sidebar = lambda ids, cwd_by_id: {
+            "ok": True,
+            "catalog": {"removedThreadIds": list(ids), "error": None},
+            "notification": {"notifiedThreadIds": list(ids), "error": None},
+            "warnings": [],
+        }
         server.PROTECTED_THREAD_IDS.clear()
 
     def tearDown(self):
         server.APP = self.original_app
+        server.sync_desktop_sidebar = self.original_sync
         server.PROTECTED_THREAD_IDS.clear()
 
     def test_extracts_thread_id_from_supported_metadata(self):
@@ -114,7 +125,61 @@ class SessionCleanerTests(unittest.TestCase):
         ])
         data = server.delete_sessions(["victim"], "永久删除", "manager")
         self.assertTrue(data["results"][0]["ok"])
+        self.assertTrue(data["sidebarSync"]["ok"])
         self.assertIn(("thread/delete", {"threadId": "victim"}), server.APP.calls)
+
+    def test_catalog_cleanup_is_exact_and_updates_revision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            codex_home = Path(directory)
+            database = codex_home / "sqlite" / "codex-dev.db"
+            database.parent.mkdir()
+            connection = sqlite3.connect(database)
+            connection.executescript("""
+                CREATE TABLE local_thread_catalog (
+                    host_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    missing_candidate INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE local_thread_catalog_sync_state (
+                    host_id TEXT PRIMARY KEY,
+                    observation_sequence INTEGER NOT NULL
+                );
+                CREATE TABLE local_thread_catalog_metadata (
+                    id INTEGER PRIMARY KEY,
+                    catalog_revision INTEGER NOT NULL
+                );
+                INSERT INTO local_thread_catalog VALUES ('local', 'victim', 0);
+                INSERT INTO local_thread_catalog VALUES ('local', 'keeper', 0);
+                INSERT INTO local_thread_catalog_sync_state VALUES ('local', 7);
+                INSERT INTO local_thread_catalog_metadata VALUES (1, 11);
+            """)
+            connection.commit()
+            connection.close()
+            previous = os.environ.get("CODEX_HOME")
+            os.environ["CODEX_HOME"] = str(codex_home)
+            try:
+                result = server._remove_from_desktop_catalog(["victim"])
+            finally:
+                if previous is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = previous
+            self.assertIsNone(result["error"])
+            self.assertEqual(result["removedThreadIds"], ["victim"])
+            connection = sqlite3.connect(database)
+            self.assertEqual(
+                connection.execute("SELECT thread_id FROM local_thread_catalog").fetchall(),
+                [("keeper",)],
+            )
+            self.assertEqual(
+                connection.execute("SELECT observation_sequence FROM local_thread_catalog_sync_state").fetchone()[0],
+                8,
+            )
+            self.assertEqual(
+                connection.execute("SELECT catalog_revision FROM local_thread_catalog_metadata").fetchone()[0],
+                12,
+            )
+            connection.close()
 
     def test_mcp_resource_is_self_contained_html(self):
         response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {"uri": server.RESOURCE_URI}})
