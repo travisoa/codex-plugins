@@ -214,7 +214,17 @@ class HostBridge:
         self._next_id += 1
         _write_message({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise HostError(f"等待宿主响应 {method} 超时。")
+            try:
+                # readline 会无界阻塞，必须先等可读再读，否则 timeout 形同虚设。
+                ready, _, _ = select.select([sys.stdin], [], [], min(0.25, remaining))
+            except (OSError, ValueError):
+                ready = [sys.stdin]  # stdin 不支持 select 时退回阻塞读
+            if not ready:
+                continue
             line = sys.stdin.readline()
             if not line:
                 raise HostError("宿主连接已关闭。")
@@ -229,7 +239,6 @@ class HostBridge:
                     raise HostError(detail)
                 return message.get("result")
             self.deferred.append(message)
-        raise HostError(f"等待宿主响应 {method} 超时。")
 
 
 HOST = HostBridge()
@@ -1052,8 +1061,8 @@ def _validate_ids(value: Any) -> list[str]:
             ids.append(item)
     if not ids:
         raise ValueError("请至少选择一个会话。")
-    if len(ids) > 100:
-        raise ValueError("单次最多处理 100 个会话。")
+    if len(ids) > BATCH_LIMIT:
+        raise ValueError(f"单次最多处理 {BATCH_LIMIT} 个会话。")
     return ids
 
 
@@ -1197,6 +1206,7 @@ def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -
 # 逐字段渲染的宿主上，字段太多会让用户按很多次回车，超过就改用整体确认。
 ELICIT_FIELD_LIMIT = 8
 # 序号输入只占一个字段，候选分页列出，避免一次塞进过长的提示语。
+BATCH_LIMIT = 100
 PICK_PAGE_SIZE = 10
 # 只为挡住异常宿主造成的死循环，正常翻页远达不到这个次数。
 PICK_MAX_ROUNDS = 500
@@ -1557,6 +1567,13 @@ def _elicit_action(count: int) -> str:
 def _run_picked_action(
     action: str, picked: list[str], current_id: str | None, outcome: dict[str, Any]
 ) -> None:
+    if len(picked) > BATCH_LIMIT:
+        outcome["performed"] = "none"
+        outcome["note"] = (
+            f"一次最多处理 {BATCH_LIMIT} 个会话，本次选中 {len(picked)} 个；"
+            "请缩小筛选范围后分批处理。"
+        )
+        return
     if action == "cancel":
         outcome["performed"] = "none"
         outcome["note"] = f"已选择 {len(picked)} 个会话，但你选择了取消，未做任何改动。"
@@ -1582,18 +1599,19 @@ def _run_picked_action(
     )
 
 
-def _interactive_pick(current_id: str | None, data: dict[str, Any]) -> dict[str, Any] | None:
-    """CLI 类宿主上把“打开管理页”变成筛选 + 勾选两步交互。"""
-    if not _should_elicit():
-        return None
+def _interactive_pick(current_id: str | None, data: dict[str, Any]) -> dict[str, Any]:
+    """筛选 → 选择 → 操作三步交互。"""
     sessions = data.get("sessions") or []
     chosen = _elicit_filter(data.get("availableTags") or [], len(sessions))
     if chosen is None:
-        return None
+        return {"data": data, "outcome": {"note": "你已取消，未做任何改动。"}}
 
-    filtered = list_sessions(
-        current_id, chosen["scope"], "", chosen["datePreset"], "", "", chosen["tag"]
-    )
+    if (chosen["scope"], chosen["datePreset"], chosen["tag"]) == ("all", "all", ""):
+        filtered = data  # 条件没变就不必重新拉一遍全量列表
+    else:
+        filtered = list_sessions(
+            current_id, chosen["scope"], "", chosen["datePreset"], "", "", chosen["tag"]
+        )
     outcome: dict[str, Any] = {"filter": chosen, "matched": filtered["total"]}
     # 列出全部结果，当前会话也显示出来（标注受保护），避免用户以为它被漏掉了。
     candidates = list(filtered["sessions"])
@@ -1650,14 +1668,23 @@ def _tool_definitions() -> list[dict[str, Any]]:
         {
             "name": "open_session_manager",
             "title": "打开 Codex 会话管理页",
-            "description": (
-                "列出本地 Codex 会话并打开管理界面。"
-                "在支持交互表单的命令行客户端上会引导用户筛选、选择会话并选定归档或删除操作，"
-                "该操作由用户在表单中直接确认。"
-            ),
+            "description": "列出本地 Codex 会话并打开管理界面。",
             "inputSchema": {"type": "object", "properties": {}},
-            "annotations": {"readOnlyHint": False, "destructiveHint": True},
+            "annotations": {"readOnlyHint": True, "destructiveHint": False},
             "_meta": ui_meta,
+        },
+        {
+            "name": "select_sessions",
+            "title": "交互式选择并处理 Codex 会话",
+            "description": (
+                "在无法渲染管理页、但支持交互表单的客户端（如 Codex CLI）中使用："
+                "引导用户依次完成筛选、选择会话、选定归档或永久删除，操作由用户在表单中直接确认。"
+                "客户端能够显示管理页时不要调用本工具。"
+            ),
+            "inputSchema": {"type": "object", "properties": {
+                "managerContext": {"type": "string", "description": "管理页内部上下文令牌。"},
+            }},
+            "annotations": {"readOnlyHint": False, "destructiveHint": True},
         },
         {
             "name": "list_sessions",
@@ -1757,7 +1784,7 @@ def _tui_hint() -> str:
     if _host_renders_ui() is not False:
         return ""
     if _host_supports_elicitation():
-        return "\n\n如需勾选式批量操作，可再次调用 open_session_manager 进入交互式筛选与勾选。"
+        return "\n\n如需勾选式批量操作，可调用 select_sessions 进入交互式筛选、选择与操作。"
     return (
         "\n\n当前客户端既不能渲染管理页组件，也不支持交互表单。"
         "需要勾选式批量操作时，可在终端运行插件目录下的 scripts/launch_tui.sh。"
@@ -1855,14 +1882,16 @@ def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]
             data["locale"] = locale
         if manager_context:
             data["managerContext"] = manager_context
-        interactive = _interactive_pick(current_id, data)
-        if interactive is not None:
-            payload = interactive["data"]
-            payload["interactive"] = interactive["outcome"]
-            if manager_context:
-                payload["managerContext"] = manager_context
-            return _text_result(payload, _interactive_text(payload, interactive["outcome"]))
         return _text_result(data, _sessions_text(data))
+    if name == "select_sessions":
+        current_id, _ = _current_id_for_call(meta, arguments, require=True)
+        if not _host_supports_elicitation():
+            raise ValueError("当前客户端不支持交互表单，请改用 open_session_manager 查看会话列表。")
+        data = list_sessions(current_id, "all", "")
+        interactive = _interactive_pick(current_id, data)
+        payload = interactive["data"]
+        payload["interactive"] = interactive["outcome"]
+        return _text_result(payload, _interactive_text(payload, interactive["outcome"]))
     if name == "list_sessions":
         current_id, manager_context = _current_id_for_call(meta, arguments)
         scope = str(arguments.get("scope") or "all")
@@ -1950,9 +1979,19 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
         return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32000, "message": str(exc)}}
 
 
+def _is_response(message: Any) -> bool:
+    return (
+        isinstance(message, dict)
+        and "method" not in message
+        and ("result" in message or "error" in message)
+    )
+
+
 def _dispatch(payload: Any) -> None:
     try:
         request = json.loads(payload) if isinstance(payload, str) else payload
+        if _is_response(request):
+            return  # 迟到的应答，不是请求，回错误只会干扰宿主
         response = handle(request)
     except Exception as exc:
         response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(exc)}}

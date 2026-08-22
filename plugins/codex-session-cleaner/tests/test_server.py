@@ -659,7 +659,7 @@ class SessionCleanerTests(unittest.TestCase):
 
         # 能弹表单的宿主应被引导去交互式勾选，而不是另开一个 TUI。
         with_elicitation = body({"elicitation": {"form": {}}})
-        self.assertIn("交互式筛选与勾选", with_elicitation)
+        self.assertIn("select_sessions", with_elicitation)
         self.assertNotIn("launch_tui.sh", with_elicitation)
 
         # 两种能力都没有的宿主才建议用终端界面。
@@ -668,7 +668,7 @@ class SessionCleanerTests(unittest.TestCase):
         # 能渲染管理页的宿主不需要任何额外提示。
         rendered = body({"ui": {}})
         self.assertNotIn("launch_tui.sh", rendered)
-        self.assertNotIn("交互式筛选与勾选", rendered)
+        self.assertNotIn("select_sessions", rendered)
 
     def test_operation_text_reports_each_failure(self):
         server._HOST.clear()
@@ -839,7 +839,7 @@ class InteractivePickerTests(unittest.TestCase):
         server.HOST.request = fake_request
 
     def open(self):
-        return server.call_tool("open_session_manager", {}, {"threadId": "manager"})
+        return server.call_tool("select_sessions", {}, {"threadId": "manager"})
 
     FILTER_OK = {"action": "accept", "content": {"scope": "all", "datePreset": "all", "tag": ""}}
 
@@ -1062,12 +1062,12 @@ class InteractivePickerTests(unittest.TestCase):
         # all 不该因为列表里混有受保护会话而被拒绝。
         self.assertEqual(outcome["selectedThreadIds"], ["t-0", "t-1", "t-3", "t-4"])
 
-    def test_cancelling_the_filter_falls_back_to_the_text_listing(self):
+    def test_cancelling_the_filter_reports_no_change(self):
         self.host(3)
         self.answers({"action": "decline"})
-        result = self.open()
-        self.assertNotIn("interactive", result["structuredContent"])
-        self.assertIn("共 3 个可管理 Codex 会话", result["content"][0]["text"])
+        outcome = self.open()["structuredContent"]["interactive"]
+        self.assertNotIn("selectedThreadIds", outcome)
+        self.assertIn("取消", outcome["note"])
 
     def test_picking_nothing_changes_nothing(self):
         self.host(3)
@@ -1097,7 +1097,7 @@ class InteractivePickerTests(unittest.TestCase):
             "params": {"capabilities": self.CLI},
         })
         self.answers(self.FILTER_OK, {"action": "accept", "content": {"selection": ""}})
-        server.call_tool("open_session_manager", {}, {"threadId": "root-1"})
+        server.call_tool("select_sessions", {}, {"threadId": "root-1"})
         listing = self.prompts[1]["message"]
 
         # 子代理会话不单独出现，和管理页一致。
@@ -1111,12 +1111,67 @@ class InteractivePickerTests(unittest.TestCase):
         self.assertIn("（临时会话，不可操作）", listing)
         self.assertIn("（当前会话，受保护）", listing)
 
-    def test_hosts_with_a_manager_page_keep_the_component_flow(self):
-        self.host(3, capabilities={"ui": {}, "elicitation": {"form": {}}})
-        self.answers({"action": "decline"})
-        result = self.open()
-        self.assertEqual(self.prompts, [])
-        self.assertNotIn("interactive", result["structuredContent"])
+    def test_open_session_manager_never_prompts_on_any_host(self):
+        """打开管理页只列会话；交互由 select_sessions 显式承担。"""
+        for capabilities in ({"elicitation": {"form": {}}}, {"ui": {}}, {"tools": {}}):
+            self.prompts = []
+            self.host(3, capabilities=capabilities)
+            self.answers({"action": "decline"})
+            result = server.call_tool("open_session_manager", {}, {"threadId": "manager"})
+            self.assertEqual(self.prompts, [], capabilities)
+            self.assertNotIn("interactive", result["structuredContent"], capabilities)
+
+    def test_select_sessions_refuses_hosts_without_elicitation(self):
+        self.host(3, capabilities={"tools": {}})
+        with self.assertRaisesRegex(ValueError, "不支持交互表单"):
+            server.call_tool("select_sessions", {}, {"threadId": "manager"})
+
+    def test_default_filter_reuses_the_listing_already_fetched(self):
+        self.host(6)
+        calls = []
+        original = server.list_sessions
+        def counted(*args, **kwargs):
+            calls.append(args[1:4])
+            return original(*args, **kwargs)
+        server.list_sessions = counted
+        try:
+            self.answers(self.FILTER_OK,
+                         {"action": "accept", "content": {"selection": ""}})
+            self.open()
+        finally:
+            server.list_sessions = original
+        # 条件仍是默认值时不该再拉一次全量列表。
+        self.assertEqual(len(calls), 1)
+
+    def test_a_narrowed_filter_does_refetch(self):
+        self.host(6)
+        calls = []
+        original = server.list_sessions
+        def counted(*args, **kwargs):
+            calls.append(args[1:4])
+            return original(*args, **kwargs)
+        server.list_sessions = counted
+        try:
+            self.answers(
+                {"action": "accept",
+                 "content": {"scope": "archived", "datePreset": "all", "tag": ""}},
+                {"action": "accept", "content": {"selection": ""}},
+            )
+            self.open()
+        finally:
+            server.list_sessions = original
+        self.assertEqual(len(calls), 2)
+
+    def test_an_oversized_batch_is_refused_like_the_tool_path(self):
+        self.host(server.BATCH_LIMIT + 20)
+        self.answers(
+            self.FILTER_OK,
+            {"action": "accept", "content": {"selection": "all", "page": "done"}},
+            {"action": "accept", "content": {"action": "delete"}},
+        )
+        outcome = self.open()["structuredContent"]["interactive"]
+        self.assertEqual(outcome["performed"], "none")
+        self.assertIn(f"一次最多处理 {server.BATCH_LIMIT} 个会话", outcome["note"])
 
 
 class ElicitationConfirmTests(unittest.TestCase):
