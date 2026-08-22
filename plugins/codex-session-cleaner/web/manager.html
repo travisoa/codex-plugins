@@ -13,6 +13,10 @@
     button,input,select { font:inherit; }
     button { color:inherit; }
     .app { max-width:1340px; margin:0 auto; padding:18px 18px 36px; }
+    .header-actions { display:flex; flex-shrink:0; align-items:center; justify-content:flex-end; gap:8px; }
+    .language-switch { display:inline-flex; flex-shrink:0; padding:2px; border:1px solid var(--line); border-radius:10px; background:var(--panel); }
+    .language-switch button { min-width:42px; border:0; border-radius:7px; padding:3px 8px; background:transparent; color:var(--muted); cursor:pointer; white-space:nowrap; }
+    .language-switch button.active { background:var(--text); color:var(--bg); }
     header { display:flex; gap:16px; align-items:center; justify-content:space-between; margin-bottom:10px; }
     h1 { font-size:23px; letter-spacing:-.02em; margin:0 0 2px; }
     .subtitle,.muted { color:var(--muted); }
@@ -70,7 +74,13 @@
   <main class="app">
     <header>
       <div><h1 id="pageTitle">Codex 会话清理器</h1><div id="pageSubtitle" class="subtitle">看清项目与文件线索，再归档或永久删除。</div></div>
-      <div id="shield" class="shield">🔒 当前管理会话受保护</div>
+      <div class="header-actions">
+        <div id="shield" class="shield">🔒 当前管理会话受保护</div>
+        <div id="languageSwitch" class="language-switch" role="group" aria-label="语言选择">
+          <button type="button" data-locale="zh">中文</button>
+          <button type="button" data-locale="en">EN</button>
+        </div>
+      </div>
     </header>
     <section id="toolbar" class="toolbar" aria-label="会话筛选">
       <input id="search" class="search" type="search" placeholder="搜索标题、ID、标签或项目路径…">
@@ -128,7 +138,7 @@
     (() => {
       const I18N = {
         zh: {
-          htmlLang: 'zh-CN', dateLocale: 'zh-CN', title: 'Codex 会话清理器',
+          htmlLang: 'zh-CN', dateLocale: 'zh-CN', title: 'Codex 会话清理器', languageSelector: '语言选择', switchChinese: '切换为中文', switchEnglish: '切换为英文',
           subtitle: '看清项目与文件线索，再归档或永久删除。', shield: '🔒 当前管理会话受保护', toolbar: '会话筛选',
           search: '搜索标题、ID、标签或项目路径…', scopeActive: '当前', scopeArchived: '已归档', scopeAll: '全部',
           tag: '标签', tagAria: '按类别标签筛选', date: '日期', dateAria: '按最后更新时间筛选',
@@ -153,7 +163,7 @@
           tagLabels: { 'hidden-fork':'隐藏分叉', 'session-management':'会话管理', automation:'自动化', 'plugin-development':'插件开发', lark:'飞书协作', documents:'文档表格', media:'图像视频', development:'代码开发', general:'常规任务' }
         },
         en: {
-          htmlLang: 'en', dateLocale: 'en-US', title: 'Codex Session Cleaner',
+          htmlLang: 'en', dateLocale: 'en-US', title: 'Codex Session Cleaner', languageSelector: 'Language', switchChinese: 'Switch to Chinese', switchEnglish: 'Switch to English',
           subtitle: 'Review project and file clues, then archive or permanently delete.', shield: '🔒 Current manager session is protected', toolbar: 'Session filters',
           search: 'Search title, ID, tag, or project path…', scopeActive: 'Current', scopeArchived: 'Archived', scopeAll: 'All',
           tag: 'Tag', tagAria: 'Filter by category tag', date: 'Date', dateAria: 'Filter by last updated date',
@@ -179,16 +189,18 @@
         }
       };
       const localeFrom = value => String(value || '').toLowerCase().startsWith('zh') ? 'zh' : 'en';
-      const state = { sessions: [], selected: new Set(), scope: 'all', search: '', tag: '', datePreset: 'all', customStart: '', customEnd: '', managerContext: '', files: new Map(), availableTags: [], loading: false, locale: localeFrom(navigator.language) };
+      const state = { sessions: [], selected: new Set(), scope: 'all', search: '', tag: '', datePreset: 'all', customStart: '', customEnd: '', managerContext: '', files: new Map(), availableTags: [], loading: false, locale: localeFrom(navigator.language), localeMode: 'auto' };
       const pending = new Map();
       let rpcId = 1;
       const $ = id => document.getElementById(id);
       const t = () => I18N[state.locale];
       const tagLabel = tag => t().tagLabels[tag.key] || tag.label || tag.key;
 
-      function setLocale(value) {
+      function setLocale(value, mode = 'auto') {
+        if (mode !== 'manual' && state.localeMode === 'manual') return;
         const locale = localeFrom(value);
-        if (state.locale === locale) return;
+        if (mode === 'manual') state.localeMode = 'manual';
+        if (state.locale === locale) { applyLocale(); return; }
         state.locale = locale;
         if ($('deleteDialog').open) { $('confirmation').value = ''; $('confirmDelete').disabled = true; }
         applyLocale();
@@ -198,6 +210,12 @@
       function applyLocale() {
         const copy = t();
         document.documentElement.lang = copy.htmlLang; document.title = copy.title;
+        $('languageSwitch').setAttribute('aria-label', copy.languageSelector);
+        document.querySelectorAll('[data-locale]').forEach(button => {
+          const active = button.dataset.locale === state.locale;
+          button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active));
+          button.title = button.dataset.locale === 'zh' ? copy.switchChinese : copy.switchEnglish;
+        });
         $('pageTitle').textContent = copy.title; $('pageSubtitle').textContent = copy.subtitle; $('shield').textContent = copy.shield;
         $('toolbar').setAttribute('aria-label', copy.toolbar); $('search').placeholder = copy.search;
         const scopeLabels = { active:copy.scopeActive, archived:copy.scopeArchived, all:copy.scopeAll };
@@ -327,7 +345,7 @@
 
       function applySessions(data) {
         if (typeof data.managerContext === 'string' && data.managerContext) state.managerContext = data.managerContext;
-        if (data.locale) state.locale = localeFrom(data.locale);
+        if (data.locale && state.localeMode !== 'manual') state.locale = localeFrom(data.locale);
         state.sessions = Array.isArray(data.sessions) ? data.sessions : [];
         state.availableTags = Array.isArray(data.availableTags) ? data.availableTags : [];
         applyLocale();
@@ -497,6 +515,7 @@
       document.querySelectorAll('[data-scope]').forEach(button => button.addEventListener('click', () => {
         state.scope = button.dataset.scope; document.querySelectorAll('[data-scope]').forEach(b => b.classList.toggle('active', b === button)); render();
       }));
+      document.querySelectorAll('[data-locale]').forEach(button => button.addEventListener('click', () => setLocale(button.dataset.locale, 'manual')));
       $('refresh').addEventListener('click', refresh);
       $('archive').addEventListener('click', archiveSelected);
       $('delete').addEventListener('click', openDelete);

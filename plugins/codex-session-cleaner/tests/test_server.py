@@ -488,6 +488,12 @@ class SessionCleanerTests(unittest.TestCase):
     def test_ui_localizes_from_host_and_uses_language_specific_delete_confirmation(self):
         html = server.UI_PATH.read_text(encoding="utf-8")
         self.assertIn("localeFrom(navigator.language)", html)
+        self.assertIn('id="languageSwitch"', html)
+        self.assertIn('data-locale="zh"', html)
+        self.assertIn('data-locale="en"', html)
+        self.assertIn("localeMode: 'auto'", html)
+        self.assertIn("state.localeMode === 'manual'", html)
+        self.assertIn("setLocale(button.dataset.locale, 'manual')", html)
         self.assertIn("ui/notifications/host-context-changed", html)
         self.assertIn("Codex Session Cleaner", html)
         self.assertIn("confirmation: '删除'", html)
