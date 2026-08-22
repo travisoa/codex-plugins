@@ -9,19 +9,22 @@
     @media (prefers-color-scheme:dark) { :root { --bg:#17181a; --panel:rgba(34,35,38,.9); --text:#f5f6f7; --muted:#a7abb1; --line:rgba(255,255,255,.12); --danger-bg:#421c1a; --shadow:0 14px 36px rgba(0,0,0,.28); } }
     * { box-sizing:border-box; }
     body { margin:0; background:radial-gradient(circle at 20% 0%,rgba(22,119,255,.11),transparent 30%),var(--bg); color:var(--text); font:14px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",sans-serif; }
-    button,input { font:inherit; }
+    button,input,select { font:inherit; }
     button { color:inherit; }
     .app { max-width:1060px; margin:0 auto; padding:24px 18px 40px; }
     header { display:flex; gap:16px; align-items:flex-start; justify-content:space-between; margin-bottom:18px; }
     h1 { font-size:25px; letter-spacing:-.02em; margin:0 0 4px; }
     .subtitle,.muted { color:var(--muted); }
     .shield { border:1px solid var(--line); background:var(--panel); padding:7px 10px; border-radius:999px; white-space:nowrap; }
-    .toolbar { position:sticky; top:0; z-index:3; display:grid; grid-template-columns:minmax(160px,1fr) auto auto; gap:10px; padding:12px; border:1px solid var(--line); border-radius:16px; background:var(--panel); backdrop-filter:blur(18px); box-shadow:var(--shadow); }
-    .search { border:1px solid var(--line); background:transparent; color:var(--text); border-radius:10px; padding:9px 11px; outline:none; }
+    .toolbar { position:sticky; top:0; z-index:3; display:grid; grid-template-columns:minmax(160px,1fr) auto auto auto; gap:10px; padding:12px; border:1px solid var(--line); border-radius:16px; background:var(--panel); backdrop-filter:blur(18px); box-shadow:var(--shadow); }
+    .search,.date-select,.date-input { border:1px solid var(--line); background:transparent; color:var(--text); border-radius:10px; padding:9px 11px; outline:none; }
     .search:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(22,119,255,.13); }
     .segments { display:flex; padding:3px; border:1px solid var(--line); border-radius:11px; }
     .segments button { border:0; background:transparent; border-radius:8px; padding:6px 10px; cursor:pointer; }
     .segments button.active { background:var(--text); color:var(--bg); }
+    .date-select { min-width:150px; cursor:pointer; }
+    .custom-dates { grid-column:1 / -1; display:flex; align-items:center; justify-content:flex-end; gap:8px; padding-top:2px; color:var(--muted); }
+    .custom-dates[hidden] { display:none; }
     .btn { border:1px solid var(--line); background:var(--panel); border-radius:10px; padding:8px 11px; cursor:pointer; }
     .btn:hover:not(:disabled) { border-color:rgba(22,119,255,.5); }
     .btn:disabled { opacity:.42; cursor:not-allowed; }
@@ -70,7 +73,20 @@
       <div class="segments" role="tablist">
         <button data-scope="active">当前</button><button data-scope="archived">已归档</button><button data-scope="all" class="active">全部</button>
       </div>
+      <select id="datePreset" class="date-select" aria-label="按最后更新时间筛选">
+        <option value="all">全部日期</option>
+        <option value="older_than_3_months">3 个月前（更早）</option>
+        <option value="older_than_1_month">1 个月前（更早）</option>
+        <option value="older_than_1_week">1 周前（更早）</option>
+        <option value="custom">自定义日期</option>
+      </select>
       <button id="refresh" class="btn">刷新</button>
+      <div id="customDates" class="custom-dates" hidden>
+        <span>最后更新时间</span>
+        <input id="customStart" class="date-input" type="date" aria-label="开始日期">
+        <span>至</span>
+        <input id="customEnd" class="date-input" type="date" aria-label="结束日期">
+      </div>
     </section>
     <div class="summary">
       <div><span id="count">正在读取…</span> <span id="selection" class="muted"></span></div>
@@ -100,7 +116,7 @@
 
   <script>
     (() => {
-      const state = { sessions: [], selected: new Set(), scope: 'all', search: '', files: new Map(), loading: false };
+      const state = { sessions: [], selected: new Set(), scope: 'all', search: '', datePreset: 'all', customStart: '', customEnd: '', files: new Map(), loading: false };
       const pending = new Map();
       let rpcId = 1;
       const $ = id => document.getElementById(id);
@@ -141,6 +157,39 @@
         return Number.isNaN(date.getTime()) ? '时间未知' : new Intl.DateTimeFormat('zh-CN', { dateStyle:'medium', timeStyle:'short' }).format(date);
       }
 
+      function timeMs(value) {
+        const number = Number(value);
+        if (!Number.isFinite(number) || number <= 0) return null;
+        return number < 1e12 ? number * 1000 : number;
+      }
+
+      function monthsBefore(months) {
+        const now = new Date();
+        const day = now.getDate();
+        const target = new Date(now);
+        target.setDate(1);
+        target.setMonth(target.getMonth() - months);
+        const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate();
+        target.setDate(Math.min(day, lastDay));
+        return target.getTime();
+      }
+
+      function matchesDate(session) {
+        if (state.datePreset === 'all') return true;
+        const updatedAt = timeMs(session.updatedAt);
+        if (updatedAt === null) return false;
+        if (state.datePreset === 'older_than_3_months') return updatedAt < monthsBefore(3);
+        if (state.datePreset === 'older_than_1_month') return updatedAt < monthsBefore(1);
+        if (state.datePreset === 'older_than_1_week') return updatedAt < Date.now() - 7 * 24 * 60 * 60 * 1000;
+        const start = state.customStart ? new Date(`${state.customStart}T00:00:00`).getTime() : null;
+        const endDate = state.customEnd ? new Date(`${state.customEnd}T00:00:00`) : null;
+        if (endDate) endDate.setDate(endDate.getDate() + 1);
+        const end = endDate?.getTime() ?? null;
+        if (start !== null && end !== null && start >= end) return false;
+        if (start === null && end === null) return true;
+        return (start === null || updatedAt >= start) && (end === null || updatedAt < end);
+      }
+
       function showToast(text) {
         $('toast').textContent = text; $('toast').classList.add('show');
         setTimeout(() => $('toast').classList.remove('show'), 2800);
@@ -150,6 +199,7 @@
         const q = state.search.trim().toLowerCase();
         return state.sessions.filter(s => {
           if (state.scope !== 'all' && (state.scope === 'archived') !== Boolean(s.archived)) return false;
+          if (!matchesDate(s)) return false;
           return !q || [s.title, s.preview, s.cwd, s.branch, s.id].some(v => String(v || '').toLowerCase().includes(q));
         });
       }
@@ -307,6 +357,14 @@
       }
 
       $('search').addEventListener('input', event => { state.search = event.target.value; render(); });
+      $('datePreset').addEventListener('change', event => {
+        state.datePreset = event.target.value;
+        state.selected.clear();
+        $('customDates').hidden = state.datePreset !== 'custom';
+        render();
+      });
+      $('customStart').addEventListener('change', event => { state.customStart = event.target.value; state.selected.clear(); render(); });
+      $('customEnd').addEventListener('change', event => { state.customEnd = event.target.value; state.selected.clear(); render(); });
       document.querySelectorAll('[data-scope]').forEach(button => button.addEventListener('click', () => {
         state.scope = button.dataset.scope; document.querySelectorAll('[data-scope]').forEach(b => b.classList.toggle('active', b === button)); render();
       }));

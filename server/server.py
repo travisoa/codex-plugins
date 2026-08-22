@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import atexit
+import calendar
 import json
 import os
 import queue
@@ -18,6 +19,7 @@ import sys
 import threading
 import time
 import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +30,13 @@ SOURCE_KINDS = [
     "cli", "vscode", "exec", "appServer", "subAgent", "subAgentReview",
     "subAgentCompact", "subAgentThreadSpawn", "subAgentOther", "unknown",
 ]
+DATE_PRESETS = {
+    "all",
+    "older_than_3_months",
+    "older_than_1_month",
+    "older_than_1_week",
+    "custom",
+}
 ROOT = Path(__file__).resolve().parent.parent
 UI_PATH = ROOT / "web" / "manager.html"
 
@@ -371,6 +380,69 @@ def _status_name(status: Any) -> str:
     return str(status or "unknown")
 
 
+def _timestamp_seconds(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    return number / 1000 if number >= 10_000_000_000 else number
+
+
+def _months_before(moment: datetime, months: int) -> datetime:
+    month_index = moment.year * 12 + moment.month - 1 - months
+    year, month_zero = divmod(month_index, 12)
+    month = month_zero + 1
+    day = min(moment.day, calendar.monthrange(year, month)[1])
+    return moment.replace(year=year, month=month, day=day)
+
+
+def _parse_filter_date(value: str, label: str) -> datetime:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(f"{label}必须是 YYYY-MM-DD 格式。") from exc
+
+
+def _date_filter_bounds(
+    preset: str,
+    custom_start: str = "",
+    custom_end: str = "",
+    now: datetime | None = None,
+) -> tuple[float | None, float | None]:
+    if preset not in DATE_PRESETS:
+        raise ValueError("datePreset 参数无效。")
+    current = now or datetime.now()
+    if preset == "all":
+        return None, None
+    if preset == "older_than_3_months":
+        return None, _months_before(current, 3).timestamp()
+    if preset == "older_than_1_month":
+        return None, _months_before(current, 1).timestamp()
+    if preset == "older_than_1_week":
+        return None, (current - timedelta(days=7)).timestamp()
+    if not custom_start and not custom_end:
+        raise ValueError("自定义日期至少需要填写开始日期或结束日期。")
+    start = _parse_filter_date(custom_start, "开始日期") if custom_start else None
+    end = _parse_filter_date(custom_end, "结束日期") if custom_end else None
+    if start is not None and end is not None and start > end:
+        raise ValueError("开始日期不能晚于结束日期。")
+    return (
+        start.timestamp() if start is not None else None,
+        (end + timedelta(days=1)).timestamp() if end is not None else None,
+    )
+
+
+def _matches_date_filter(item: dict[str, Any], start: float | None, end: float | None) -> bool:
+    if start is None and end is None:
+        return True
+    updated_at = _timestamp_seconds(item.get("updatedAt"))
+    if updated_at is None:
+        return False
+    return (start is None or updated_at >= start) and (end is None or updated_at < end)
+
+
 def _normalize_thread(thread: dict[str, Any], archived: bool, current_id: str | None) -> dict[str, Any]:
     cwd = str(thread.get("cwd") or "")
     git = thread.get("gitInfo") if isinstance(thread.get("gitInfo"), dict) else {}
@@ -422,7 +494,18 @@ def _list_one(archived: bool, search: str = "") -> list[dict[str, Any]]:
     return output
 
 
-def list_sessions(current_id: str | None, scope: str = "all", search: str = "") -> dict[str, Any]:
+def list_sessions(
+    current_id: str | None,
+    scope: str = "all",
+    search: str = "",
+    date_preset: str = "all",
+    custom_start: str = "",
+    custom_end: str = "",
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    date_start, date_end = _date_filter_bounds(
+        date_preset, custom_start, custom_end, now
+    )
     if current_id:
         PROTECTED_THREAD_IDS.add(current_id)
     raw: list[tuple[dict[str, Any], bool]] = []
@@ -453,7 +536,7 @@ def list_sessions(current_id: str | None, scope: str = "all", search: str = "") 
         if thread.get("parentThreadId") is not None:
             continue
         item = _normalize_thread(thread, archived, current_id)
-        if item["id"]:
+        if item["id"] and _matches_date_filter(item, date_start, date_end):
             item["descendantCount"] = descendants(item["id"])
             item["deletable"] = not item["current"] and not item["protected"] and not item["ephemeral"]
             normalized.append(item)
@@ -465,6 +548,11 @@ def list_sessions(current_id: str | None, scope: str = "all", search: str = "") 
         "currentThreadId": current_id,
         "scope": scope,
         "search": search,
+        "dateFilter": {
+            "preset": date_preset,
+            "customStart": custom_start,
+            "customEnd": custom_end,
+        },
     }
 
 
@@ -597,12 +685,19 @@ def _tool_definitions() -> list[dict[str, Any]]:
         {
             "name": "list_sessions",
             "title": "列出 Codex 会话",
-            "description": "按活动、归档或全部范围列出会话。",
+            "description": "按活动/归档状态、搜索词和最后更新时间列出会话。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "scope": {"type": "string", "enum": ["active", "archived", "all"], "default": "all"},
                     "search": {"type": "string", "default": ""},
+                    "datePreset": {
+                        "type": "string",
+                        "enum": ["all", "older_than_3_months", "older_than_1_month", "older_than_1_week", "custom"],
+                        "default": "all",
+                    },
+                    "customStart": {"type": "string", "default": ""},
+                    "customEnd": {"type": "string", "default": ""},
                 },
             },
             "annotations": {"readOnlyHint": True, "destructiveHint": False},
@@ -658,7 +753,14 @@ def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]
         scope = "all" if name == "open_session_manager" else str(arguments.get("scope") or "all")
         if scope not in ("active", "archived", "all"):
             raise ValueError("scope 必须是 active、archived 或 all。")
-        data = list_sessions(current_id, scope, str(arguments.get("search") or ""))
+        data = list_sessions(
+            current_id,
+            scope,
+            str(arguments.get("search") or ""),
+            str(arguments.get("datePreset") or "all"),
+            str(arguments.get("customStart") or ""),
+            str(arguments.get("customEnd") or ""),
+        )
         return _text_result(data, f"已列出 {data['total']} 个顶层 Codex 会话。")
     if name == "inspect_session_files":
         thread_id = str(arguments.get("threadId") or "").strip()

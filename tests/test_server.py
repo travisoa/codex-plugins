@@ -5,6 +5,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -85,6 +86,51 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertEqual(data["total"], 550)
         self.assertEqual(len(data["sessions"]), 550)
         self.assertFalse(data["truncated"])
+
+    def test_date_presets_filter_by_last_updated_time(self):
+        now = datetime(2026, 8, 22, 12, 0, 0)
+        server.APP = FakeApp(active=[
+            {"id": "old", "name": "Old", "updatedAt": (now - timedelta(days=100)).timestamp()},
+            {"id": "month", "name": "Month", "updatedAt": (now - timedelta(days=40)).timestamp()},
+            {"id": "recent", "name": "Recent", "updatedAt": (now - timedelta(days=3)).timestamp()},
+        ])
+        three_months = server.list_sessions(
+            "manager", "active", date_preset="older_than_3_months", now=now
+        )
+        one_month = server.list_sessions(
+            "manager", "active", date_preset="older_than_1_month", now=now
+        )
+        one_week = server.list_sessions(
+            "manager", "active", date_preset="older_than_1_week", now=now
+        )
+        self.assertEqual([row["id"] for row in three_months["sessions"]], ["old"])
+        self.assertEqual({row["id"] for row in one_month["sessions"]}, {"old", "month"})
+        self.assertEqual({row["id"] for row in one_week["sessions"]}, {"old", "month"})
+
+    def test_custom_date_filter_is_inclusive_for_both_dates(self):
+        server.APP = FakeApp(active=[
+            {"id": "inside", "name": "Inside", "updatedAt": datetime(2026, 8, 10, 23, 30).timestamp()},
+            {"id": "outside", "name": "Outside", "updatedAt": datetime(2026, 8, 11, 0, 0).timestamp()},
+        ])
+        data = server.list_sessions(
+            "manager",
+            "active",
+            date_preset="custom",
+            custom_start="2026-08-10",
+            custom_end="2026-08-10",
+        )
+        self.assertEqual([row["id"] for row in data["sessions"]], ["inside"])
+
+    def test_custom_date_filter_rejects_reversed_range(self):
+        server.APP = FakeApp()
+        with self.assertRaisesRegex(ValueError, "开始日期不能晚于结束日期"):
+            server.list_sessions(
+                "manager",
+                "active",
+                date_preset="custom",
+                custom_start="2026-08-11",
+                custom_end="2026-08-10",
+            )
 
     def test_file_inspection_separates_changes_and_references(self):
         server.APP = FakeApp(thread={
@@ -196,6 +242,9 @@ class SessionCleanerTests(unittest.TestCase):
             html.index("if (copyTextWithSelection(text))"),
             html.index("navigator.clipboard?.writeText"),
         )
+        self.assertIn('value="older_than_3_months"', html)
+        self.assertIn('id="customStart"', html)
+        self.assertIn('id="customEnd"', html)
 
 
 if __name__ == "__main__":
