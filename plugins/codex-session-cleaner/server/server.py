@@ -390,6 +390,24 @@ def _thread_id_from_meta(meta: Any) -> str | None:
     return None
 
 
+def _locale_from_meta(meta: Any) -> str | None:
+    if not isinstance(meta, dict):
+        return None
+    for key in ("openai/locale", "locale", "language", "openai/language"):
+        value = meta.get(key)
+        if isinstance(value, str) and value.strip():
+            return "zh" if value.strip().lower().startswith("zh") else "en"
+    encoded = meta.get("x-codex-turn-metadata")
+    if isinstance(encoded, str):
+        try:
+            return _locale_from_meta(json.loads(encoded))
+        except json.JSONDecodeError:
+            return None
+    if isinstance(encoded, dict):
+        return _locale_from_meta(encoded)
+    return None
+
+
 def _purge_manager_contexts(now: float | None = None) -> None:
     current = time.monotonic() if now is None else now
     expired = [token for token, (_, expires_at) in _MANAGER_CONTEXTS.items() if expires_at <= current]
@@ -1034,8 +1052,8 @@ def _delete_order(ids: list[str], history_threads: list[dict[str, Any]]) -> list
 
 
 def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -> dict[str, Any]:
-    if confirmation != "永久删除":
-        raise ValueError("确认词不正确，必须输入“永久删除”。")
+    if confirmation not in ("删除", "delete"):
+        raise ValueError("确认词不正确，中文界面请输入“删除”，英文界面请输入“delete”。")
     if not current_id:
         raise ValueError("缺少当前会话元数据；为避免误删，已拒绝操作。请从 Codex 会话管理页执行。")
     if current_id in ids:
@@ -1161,7 +1179,7 @@ def _tool_definitions() -> list[dict[str, Any]]:
                 "type": "object",
                 "properties": {
                     "threadIds": {"type": "array", "items": {"type": "string"}},
-                    "confirmation": {"type": "string", "const": "永久删除"},
+                    "confirmation": {"type": "string", "enum": ["删除", "delete"]},
                     "managerContext": {"type": "string", "description": "管理页内部上下文令牌。"},
                 },
                 "required": ["threadIds", "confirmation"],
@@ -1184,6 +1202,9 @@ def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]
         current_id = _thread_id_from_meta(meta)
         manager_context = _create_manager_context(current_id)
         data = list_sessions(current_id, "all", "")
+        locale = _locale_from_meta(meta)
+        if locale:
+            data["locale"] = locale
         if manager_context:
             data["managerContext"] = manager_context
         return _text_result(data, f"已列出 {data['total']} 个可管理 Codex 会话。")

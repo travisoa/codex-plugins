@@ -60,6 +60,11 @@ class SessionCleanerTests(unittest.TestCase):
         encoded = json.dumps({"thread_id": "nested"})
         self.assertEqual(server._thread_id_from_meta({"x-codex-turn-metadata": encoded}), "nested")
 
+    def test_extracts_ui_locale_from_supported_metadata(self):
+        self.assertEqual(server._locale_from_meta({"openai/locale": "zh-CN"}), "zh")
+        encoded = json.dumps({"locale": "en-US"})
+        self.assertEqual(server._locale_from_meta({"x-codex-turn-metadata": encoded}), "en")
+
     def test_list_only_returns_roots_and_counts_descendants(self):
         server.APP = FakeApp(active=[
             {"id": "root", "name": "Root", "cwd": "/tmp/project", "parentThreadId": None, "updatedAt": 3},
@@ -118,7 +123,7 @@ class SessionCleanerTests(unittest.TestCase):
         old_manager = next(row for row in rows if row["id"] == "old-manager")
         self.assertTrue(old_manager["deletable"])
 
-        data = server.delete_sessions(["old-manager"], "永久删除", "new-manager")
+        data = server.delete_sessions(["old-manager"], "删除", "new-manager")
         self.assertTrue(data["results"][0]["ok"])
         self.assertIn(("thread/delete", {"threadId": "old-manager"}), server.APP.calls)
 
@@ -144,13 +149,20 @@ class SessionCleanerTests(unittest.TestCase):
             "delete_sessions",
             {
                 "threadIds": ["old-manager"],
-                "confirmation": "永久删除",
+                "confirmation": "删除",
                 "managerContext": context,
             },
             None,
         )["structuredContent"]
         self.assertTrue(deleted["results"][0]["ok"])
         self.assertIn(("thread/delete", {"threadId": "old-manager"}), server.APP.calls)
+
+    def test_open_manager_passes_host_locale_to_ui(self):
+        server.APP = FakeApp(active=[])
+        opened = server.call_tool(
+            "open_session_manager", {}, {"openai/threadId": "manager", "openai/locale": "en-US"}
+        )["structuredContent"]
+        self.assertEqual(opened["locale"], "en")
 
     def test_invalid_manager_context_is_rejected_before_deletion(self):
         server.APP = FakeApp(active=[{"id": "victim", "name": "Victim", "source": "vscode"}])
@@ -159,7 +171,7 @@ class SessionCleanerTests(unittest.TestCase):
                 "delete_sessions",
                 {
                     "threadIds": ["victim"],
-                    "confirmation": "永久删除",
+                    "confirmation": "删除",
                     "managerContext": "expired",
                 },
                 None,
@@ -322,13 +334,13 @@ class SessionCleanerTests(unittest.TestCase):
     def test_delete_requires_exact_confirmation(self):
         server.APP = FakeApp()
         with self.assertRaisesRegex(ValueError, "确认词"):
-            server.delete_sessions(["victim"], "删除", "manager")
+            server.delete_sessions(["victim"], "永久删除", "manager")
         self.assertFalse(any(method == "thread/delete" for method, _ in server.APP.calls))
 
     def test_delete_requires_current_thread_metadata(self):
         server.APP = FakeApp()
         with self.assertRaisesRegex(ValueError, "当前会话元数据"):
-            server.delete_sessions(["victim"], "永久删除", None)
+            server.delete_sessions(["victim"], "删除", None)
         self.assertFalse(any(method == "thread/delete" for method, _ in server.APP.calls))
 
     def test_delete_rejects_current_thread_as_atomic_batch(self):
@@ -337,17 +349,24 @@ class SessionCleanerTests(unittest.TestCase):
             {"id": "victim", "name": "Victim", "cwd": "/tmp", "parentThreadId": None},
         ])
         with self.assertRaisesRegex(ValueError, "当前管理会话"):
-            server.delete_sessions(["victim", "manager"], "永久删除", "manager")
+            server.delete_sessions(["victim", "manager"], "删除", "manager")
         self.assertFalse(any(method == "thread/delete" for method, _ in server.APP.calls))
 
     def test_delete_revalidates_then_uses_official_method(self):
         server.APP = FakeApp(active=[
             {"id": "victim", "name": "Victim", "cwd": "/tmp/project", "parentThreadId": None},
         ])
-        data = server.delete_sessions(["victim"], "永久删除", "manager")
+        data = server.delete_sessions(["victim"], "删除", "manager")
         self.assertTrue(data["results"][0]["ok"])
         self.assertTrue(data["sidebarSync"]["ok"])
         self.assertIn(("thread/delete", {"threadId": "victim"}), server.APP.calls)
+
+    def test_delete_accepts_english_confirmation(self):
+        server.APP = FakeApp(active=[
+            {"id": "victim", "name": "Victim", "cwd": "/tmp/project", "parentThreadId": None},
+        ])
+        data = server.delete_sessions(["victim"], "delete", "manager")
+        self.assertTrue(data["results"][0]["ok"])
 
     def test_delete_blocks_source_when_hidden_fork_is_not_selected(self):
         server.APP = FakeApp(active=[
@@ -361,7 +380,7 @@ class SessionCleanerTests(unittest.TestCase):
             "historyBaseThreadId": "source",
             "hiddenFromList": True,
         }]
-        data = server.delete_sessions(["source"], "永久删除", "manager")
+        data = server.delete_sessions(["source"], "删除", "manager")
         self.assertFalse(data["results"][0]["ok"])
         self.assertEqual(data["results"][0]["blockingThreadIds"], ["hidden-fork"])
         self.assertFalse(any(method == "thread/delete" for method, _ in server.APP.calls))
@@ -378,7 +397,7 @@ class SessionCleanerTests(unittest.TestCase):
             "historyBaseThreadId": "source",
             "hiddenFromList": True,
         }]
-        data = server.delete_sessions(["source", "hidden-fork"], "永久删除", "manager")
+        data = server.delete_sessions(["source", "hidden-fork"], "删除", "manager")
         delete_calls = [params["threadId"] for method, params in server.APP.calls if method == "thread/delete"]
         self.assertEqual(delete_calls, ["hidden-fork", "source"])
         self.assertEqual(data["operationOrder"], ["hidden-fork", "source"])
@@ -459,12 +478,24 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertIn('id="tagFilter"', html)
         self.assertIn('<option value="">标签</option>', html)
         self.assertIn('<option value="all">日期</option>', html)
-        self.assertIn("new Option('标签', '')", html)
+        self.assertIn("new Option(t().tag, '')", html)
         self.assertIn('id="customStart"', html)
         self.assertIn('id="customEnd"', html)
         self.assertIn("managerContext: ''", html)
         self.assertIn("{ ...args, managerContext: state.managerContext }", html)
         self.assertIn("failed[0].error", html)
+
+    def test_ui_localizes_from_host_and_uses_language_specific_delete_confirmation(self):
+        html = server.UI_PATH.read_text(encoding="utf-8")
+        self.assertIn("localeFrom(navigator.language)", html)
+        self.assertIn("ui/notifications/host-context-changed", html)
+        self.assertIn("Codex Session Cleaner", html)
+        self.assertIn("confirmation: '删除'", html)
+        self.assertIn("confirmation: 'delete'", html)
+        self.assertIn("confirmation: t().confirmation", html)
+        self.assertIn("event.target.value !== t().confirmation", html)
+        self.assertIn('<button id="cancelDelete" type="button"', html)
+        self.assertIn("$('cancelDelete').addEventListener('click', () => $('deleteDialog').close())", html)
 
     def test_date_filter_options_keep_contrast_in_native_popup(self):
         html = server.UI_PATH.read_text(encoding="utf-8")
@@ -474,7 +505,7 @@ class SessionCleanerTests(unittest.TestCase):
 
     def test_selection_actions_use_compact_wide_toolbar(self):
         html = server.UI_PATH.read_text(encoding="utf-8")
-        toolbar_start = html.index('<section class="toolbar"')
+        toolbar_start = html.index('<section id="toolbar" class="toolbar"')
         summary = html.index('<div class="summary">')
         toolbar_end = html.index("</section>", toolbar_start)
         self.assertLess(toolbar_start, summary)

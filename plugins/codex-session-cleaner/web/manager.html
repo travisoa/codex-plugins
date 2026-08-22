@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
   <title>Codex 会话清理器</title>
   <style>
     :root { color-scheme: light dark; --bg:#f4f5f7; --panel:rgba(255,255,255,.88); --text:#17191d; --muted:#6e737b; --line:rgba(23,25,29,.11); --accent:#1677ff; --danger:#d92d20; --danger-bg:#fff0ee; --shadow:0 14px 36px rgba(24,30,42,.10); }
@@ -68,10 +69,10 @@
 <body>
   <main class="app">
     <header>
-      <div><h1>Codex 会话清理器</h1><div class="subtitle">看清项目与文件线索，再归档或永久删除。</div></div>
-      <div class="shield">🔒 当前管理会话受保护</div>
+      <div><h1 id="pageTitle">Codex 会话清理器</h1><div id="pageSubtitle" class="subtitle">看清项目与文件线索，再归档或永久删除。</div></div>
+      <div id="shield" class="shield">🔒 当前管理会话受保护</div>
     </header>
-    <section class="toolbar" aria-label="会话筛选">
+    <section id="toolbar" class="toolbar" aria-label="会话筛选">
       <input id="search" class="search" type="search" placeholder="搜索标题、ID、标签或项目路径…">
       <div class="segments" role="tablist">
         <button data-scope="active">当前</button><button data-scope="archived">已归档</button><button data-scope="all" class="active">全部</button>
@@ -105,18 +106,18 @@
       </div>
     </section>
     <section id="list" class="list" aria-live="polite"></section>
-    <div class="notice">删除会话不会删除项目文件。文件列表只是从会话记录提取的修改/引用线索；共享插件缓存、模型缓存、认证信息和全局配置不在本插件清理范围内。</div>
+    <div id="notice" class="notice">删除会话不会删除项目文件。文件列表只是从会话记录提取的修改/引用线索；共享插件缓存、模型缓存、认证信息和全局配置不在本插件清理范围内。</div>
   </main>
 
   <dialog id="deleteDialog">
     <form method="dialog" class="modal" id="deleteForm">
-      <h2>永久删除 <span id="deleteCount"></span> 个会话？</h2>
-      <div class="muted">Codex 会一并删除这些会话的派生会话和持久化元数据。此操作不可撤销。</div>
-      <div class="danger-box">项目文件不会被删除，但会话内容将无法从 Codex 恢复。</div>
-      <label for="confirmation">输入 <strong>永久删除</strong> 继续</label>
-      <input id="confirmation" class="confirm" autocomplete="off" placeholder="永久删除">
+      <h2 id="deleteHeading">永久删除所选会话？</h2>
+      <div id="deleteDescription" class="muted">Codex 会一并删除这些会话的派生会话和持久化元数据。此操作不可撤销。</div>
+      <div id="deleteDanger" class="danger-box">项目文件不会被删除，但会话内容将无法从 Codex 恢复。</div>
+      <label id="confirmationLabel" for="confirmation"></label>
+      <input id="confirmation" class="confirm" autocomplete="off" placeholder="删除">
       <div class="modal-actions">
-        <button value="cancel" class="btn">取消</button>
+        <button id="cancelDelete" type="button" class="btn">取消</button>
         <button id="confirmDelete" value="default" class="btn danger" disabled>确认永久删除</button>
       </div>
     </form>
@@ -125,33 +126,123 @@
 
   <script>
     (() => {
-      const state = { sessions: [], selected: new Set(), scope: 'all', search: '', tag: '', datePreset: 'all', customStart: '', customEnd: '', managerContext: '', files: new Map(), loading: false };
+      const I18N = {
+        zh: {
+          htmlLang: 'zh-CN', dateLocale: 'zh-CN', title: 'Codex 会话清理器',
+          subtitle: '看清项目与文件线索，再归档或永久删除。', shield: '🔒 当前管理会话受保护', toolbar: '会话筛选',
+          search: '搜索标题、ID、标签或项目路径…', scopeActive: '当前', scopeArchived: '已归档', scopeAll: '全部',
+          tag: '标签', tagAria: '按类别标签筛选', date: '日期', dateAria: '按最后更新时间筛选',
+          withinDay: '1 天内', withinWeek: '1 周内', withinMonth: '1 个月内', older3Months: '3 个月前（更早）',
+          olderMonth: '1 个月前（更早）', olderWeek: '1 周前（更早）', custom: '自定义日期', refresh: '刷新',
+          lastUpdated: '最后更新时间', to: '至', startDate: '开始日期', endDate: '结束日期',
+          archiveSelected: '归档所选', deleteSelected: '永久删除所选',
+          notice: '删除会话不会删除项目文件。文件列表只是从会话记录提取的修改/引用线索；共享插件缓存、模型缓存、认证信息和全局配置不在本插件清理范围内。',
+          requestTimeout: '请求超时', toolFailed: '工具调用失败', requestFailed: '请求失败', unknownTime: '时间未知',
+          sessions: count => `${count} 个会话`, selected: count => `· 已选 ${count}`, loading: '正在读取会话…', empty: '没有符合条件的会话',
+          protected: '当前管理会话受保护', ephemeralProtected: '临时会话不可删除', selectSession: '选择会话',
+          currentSession: '当前会话', archived: '已归档', ephemeral: '临时', unknownProject: '项目路径未知',
+          branch: value => `分支 ${value}`, descendants: count => `${count} 个派生会话`, blockers: count => `${count} 个引用分叉阻止源会话删除`, source: id => `引用源 ${id}`,
+          collapseFiles: '收起文件', inspectFiles: '查看文件', copyProject: '复制项目路径', loadingFiles: '正在读取会话文件线索…',
+          fileNote: '文件线索来自会话记录，可能不完整。', changedFiles: '修改文件', referencedFiles: '命令引用文件', noFiles: '未从会话记录中发现', copyPath: '复制路径',
+          copied: '路径已复制', copyFailed: '无法访问剪贴板，请手动复制', unknownError: '未知错误',
+          archiveFailed: (count, error) => `${count} 个会话归档失败：${error}`, archivedSuccess: '所选会话已归档',
+          deleteHeading: count => `永久删除 ${count} 个会话？`, deleteDescription: 'Codex 会一并删除这些会话的派生会话和持久化元数据。此操作不可撤销。',
+          deleteDanger: '项目文件不会被删除，但会话内容将无法从 Codex 恢复。', confirmationBefore: '输入 ', confirmationAfter: ' 继续', confirmation: '删除',
+          cancel: '取消', confirmDelete: '确认永久删除', deleteFailed: (count, error) => `${count} 个会话删除失败：${error}`,
+          sidebarSyncFailed: '会话已删除；侧边栏同步失败，请刷新或重启 Codex', deletedSuccess: '所选会话已永久删除，侧边栏已同步',
+          tagLabels: { 'hidden-fork':'隐藏分叉', 'session-management':'会话管理', automation:'自动化', 'plugin-development':'插件开发', lark:'飞书协作', documents:'文档表格', media:'图像视频', development:'代码开发', general:'常规任务' }
+        },
+        en: {
+          htmlLang: 'en', dateLocale: 'en-US', title: 'Codex Session Cleaner',
+          subtitle: 'Review project and file clues, then archive or permanently delete.', shield: '🔒 Current manager session is protected', toolbar: 'Session filters',
+          search: 'Search title, ID, tag, or project path…', scopeActive: 'Current', scopeArchived: 'Archived', scopeAll: 'All',
+          tag: 'Tag', tagAria: 'Filter by category tag', date: 'Date', dateAria: 'Filter by last updated date',
+          withinDay: 'Within 1 day', withinWeek: 'Within 1 week', withinMonth: 'Within 1 month', older3Months: 'More than 3 months ago',
+          olderMonth: 'More than 1 month ago', olderWeek: 'More than 1 week ago', custom: 'Custom range', refresh: 'Refresh',
+          lastUpdated: 'Last updated', to: 'to', startDate: 'Start date', endDate: 'End date',
+          archiveSelected: 'Archive selected', deleteSelected: 'Permanently delete selected',
+          notice: 'Deleting sessions does not delete project files. The file list only contains change and reference clues extracted from session records; shared plugin caches, model caches, credentials, and global settings are outside this plugin’s scope.',
+          requestTimeout: 'Request timed out', toolFailed: 'Tool call failed', requestFailed: 'Request failed', unknownTime: 'Unknown time',
+          sessions: count => `${count} session${count === 1 ? '' : 's'}`, selected: count => `· ${count} selected`, loading: 'Loading sessions…', empty: 'No matching sessions',
+          protected: 'Current manager session is protected', ephemeralProtected: 'Temporary sessions cannot be deleted', selectSession: 'Select session',
+          currentSession: 'Current session', archived: 'Archived', ephemeral: 'Temporary', unknownProject: 'Unknown project path',
+          branch: value => `Branch ${value}`, descendants: count => `${count} derived session${count === 1 ? '' : 's'}`, blockers: count => `${count} referencing fork${count === 1 ? '' : 's'} block source deletion`, source: id => `Source ${id}`,
+          collapseFiles: 'Hide files', inspectFiles: 'View files', copyProject: 'Copy project path', loadingFiles: 'Loading session file clues…',
+          fileNote: 'File clues are extracted from session records and may be incomplete.', changedFiles: 'Changed files', referencedFiles: 'Files referenced by commands', noFiles: 'None found in session records', copyPath: 'Copy path',
+          copied: 'Path copied', copyFailed: 'Clipboard unavailable; copy the path manually', unknownError: 'Unknown error',
+          archiveFailed: (count, error) => `${count} session${count === 1 ? '' : 's'} failed to archive: ${error}`, archivedSuccess: 'Selected sessions archived',
+          deleteHeading: count => `Permanently delete ${count} session${count === 1 ? '' : 's'}?`, deleteDescription: 'Codex will also delete derived sessions and persisted metadata. This action cannot be undone.',
+          deleteDanger: 'Project files will not be deleted, but the session content cannot be recovered in Codex.', confirmationBefore: 'Type ', confirmationAfter: ' to continue', confirmation: 'delete',
+          cancel: 'Cancel', confirmDelete: 'Confirm permanent deletion', deleteFailed: (count, error) => `${count} session${count === 1 ? '' : 's'} failed to delete: ${error}`,
+          sidebarSyncFailed: 'Sessions deleted, but sidebar sync failed. Refresh or restart Codex.', deletedSuccess: 'Selected sessions permanently deleted and sidebar synced',
+          tagLabels: { 'hidden-fork':'Hidden fork', 'session-management':'Session management', automation:'Automation', 'plugin-development':'Plugin development', lark:'Lark collaboration', documents:'Documents & sheets', media:'Images & video', development:'Code development', general:'General' }
+        }
+      };
+      const localeFrom = value => String(value || '').toLowerCase().startsWith('zh') ? 'zh' : 'en';
+      const state = { sessions: [], selected: new Set(), scope: 'all', search: '', tag: '', datePreset: 'all', customStart: '', customEnd: '', managerContext: '', files: new Map(), availableTags: [], loading: false, locale: localeFrom(navigator.language) };
       const pending = new Map();
       let rpcId = 1;
       const $ = id => document.getElementById(id);
+      const t = () => I18N[state.locale];
+      const tagLabel = tag => t().tagLabels[tag.key] || tag.label || tag.key;
+
+      function setLocale(value) {
+        const locale = localeFrom(value);
+        if (state.locale === locale) return;
+        state.locale = locale;
+        if ($('deleteDialog').open) { $('confirmation').value = ''; $('confirmDelete').disabled = true; }
+        applyLocale();
+        render();
+      }
+
+      function applyLocale() {
+        const copy = t();
+        document.documentElement.lang = copy.htmlLang; document.title = copy.title;
+        $('pageTitle').textContent = copy.title; $('pageSubtitle').textContent = copy.subtitle; $('shield').textContent = copy.shield;
+        $('toolbar').setAttribute('aria-label', copy.toolbar); $('search').placeholder = copy.search;
+        const scopeLabels = { active:copy.scopeActive, archived:copy.scopeArchived, all:copy.scopeAll };
+        document.querySelectorAll('[data-scope]').forEach(button => { button.textContent = scopeLabels[button.dataset.scope]; });
+        $('tagFilter').setAttribute('aria-label', copy.tagAria); $('datePreset').setAttribute('aria-label', copy.dateAria);
+        const dateLabels = { all:copy.date, within_1_day:copy.withinDay, within_1_week:copy.withinWeek, within_1_month:copy.withinMonth, older_than_3_months:copy.older3Months, older_than_1_month:copy.olderMonth, older_than_1_week:copy.olderWeek, custom:copy.custom };
+        for (const option of $('datePreset').options) option.textContent = dateLabels[option.value];
+        $('refresh').textContent = copy.refresh; $('customDates').children[0].textContent = copy.lastUpdated; $('customDates').children[2].textContent = copy.to;
+        $('customStart').setAttribute('aria-label', copy.startDate); $('customEnd').setAttribute('aria-label', copy.endDate);
+        $('archive').textContent = copy.archiveSelected; $('delete').textContent = copy.deleteSelected; $('notice').textContent = copy.notice;
+        $('deleteDescription').textContent = copy.deleteDescription; $('deleteDanger').textContent = copy.deleteDanger;
+        const strong = document.createElement('strong'); strong.textContent = copy.confirmation;
+        $('confirmationLabel').replaceChildren(document.createTextNode(copy.confirmationBefore), strong, document.createTextNode(copy.confirmationAfter));
+        $('confirmation').placeholder = copy.confirmation; $('cancelDelete').textContent = copy.cancel; $('confirmDelete').textContent = copy.confirmDelete;
+        $('deleteHeading').textContent = copy.deleteHeading(state.selected.size);
+        updateTagOptions(state.availableTags);
+      }
 
       function request(method, params = {}) {
         const id = rpcId++;
         window.parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*');
         return new Promise((resolve, reject) => {
           pending.set(id, { resolve, reject });
-          setTimeout(() => { if (pending.has(id)) { pending.delete(id); reject(new Error('请求超时')); } }, 45000);
+          setTimeout(() => { if (pending.has(id)) { pending.delete(id); reject(new Error(t().requestTimeout)); } }, 45000);
         });
       }
 
       async function tool(name, args = {}) {
         const argumentsWithContext = state.managerContext ? { ...args, managerContext: state.managerContext } : args;
         const result = await request('tools/call', { name, arguments: argumentsWithContext });
-        if (result?.isError) throw new Error(result.content?.[0]?.text || '工具调用失败');
+        if (result?.isError) throw new Error(result.content?.[0]?.text || t().toolFailed);
         return result?.structuredContent || result;
       }
 
       window.addEventListener('message', event => {
         const message = event.data;
         if (!message || message.jsonrpc !== '2.0') return;
-        if (message.id && pending.has(message.id)) {
+        if (message.id && pending.has(message.id) && ('result' in message || 'error' in message)) {
           const job = pending.get(message.id); pending.delete(message.id);
-          message.error ? job.reject(new Error(message.error.message || '请求失败')) : job.resolve(message.result);
+          message.error ? job.reject(new Error(message.error.message || t().requestFailed)) : job.resolve(message.result);
+          return;
+        }
+        if (message.method === 'ui/notifications/host-context-changed' || message.method === 'ui/notifications/host-context') {
+          const locale = message.params?.locale || message.params?.language || message.params?.hostContext?.locale || message.params?.hostContext?.language;
+          if (locale) setLocale(locale);
           return;
         }
         if (message.method === 'ui/notifications/tool-result') {
@@ -161,10 +252,10 @@
       });
 
       function formatTime(value) {
-        if (!value) return '时间未知';
+        if (!value) return t().unknownTime;
         const number = Number(value);
         const date = new Date(number < 1e12 ? number * 1000 : number);
-        return Number.isNaN(date.getTime()) ? '时间未知' : new Intl.DateTimeFormat('zh-CN', { dateStyle:'medium', timeStyle:'short' }).format(date);
+        return Number.isNaN(date.getTime()) ? t().unknownTime : new Intl.DateTimeFormat(t().dateLocale, { dateStyle:'medium', timeStyle:'short' }).format(date);
       }
 
       function timeMs(value) {
@@ -214,7 +305,7 @@
           if (state.scope !== 'all' && (state.scope === 'archived') !== Boolean(s.archived)) return false;
           if (!matchesDate(s)) return false;
           if (state.tag && !(s.tags || []).some(tag => tag.key === state.tag)) return false;
-          const labels = (s.tags || []).map(tag => tag.label);
+          const labels = (s.tags || []).flatMap(tag => [tag.label, tagLabel(tag)]);
           return !q || [s.title, s.preview, s.cwd, s.branch, s.id, s.historyBaseThreadId, ...labels].some(v => String(v || '').toLowerCase().includes(q));
         });
       }
@@ -225,10 +316,10 @@
           ? availableTags
           : [...new Map(state.sessions.flatMap(session => session.tags || []).map(tag => [tag.key, tag])).values()];
         const current = state.tag;
-        select.replaceChildren(new Option('标签', ''));
+        select.replaceChildren(new Option(t().tag, ''));
         for (const tag of tags) {
           const count = Number.isFinite(Number(tag.count)) ? ` · ${tag.count}` : '';
-          select.append(new Option(`${tag.label}${count}`, tag.key));
+          select.append(new Option(`${tagLabel(tag)}${count}`, tag.key));
         }
         state.tag = tags.some(tag => tag.key === current) ? current : '';
         select.value = state.tag;
@@ -236,8 +327,10 @@
 
       function applySessions(data) {
         if (typeof data.managerContext === 'string' && data.managerContext) state.managerContext = data.managerContext;
+        if (data.locale) state.locale = localeFrom(data.locale);
         state.sessions = Array.isArray(data.sessions) ? data.sessions : [];
-        updateTagOptions(data.availableTags);
+        state.availableTags = Array.isArray(data.availableTags) ? data.availableTags : [];
+        applyLocale();
         for (const id of [...state.selected]) if (!state.sessions.some(s => s.id === id && s.deletable)) state.selected.delete(id);
         render();
       }
@@ -252,18 +345,18 @@
       function renderFiles(container, session) {
         const files = state.files.get(session.id);
         const box = el('div', 'files');
-        if (files === 'loading') { box.textContent = '正在读取会话文件线索…'; container.append(box); return; }
+        if (files === 'loading') { box.textContent = t().loadingFiles; container.append(box); return; }
         if (files?.error) { box.textContent = files.error; container.append(box); return; }
         if (!files) return;
-        const note = el('div', 'muted', files.note); box.append(note);
-        const groups = [['修改文件', files.changedFiles || []], ['命令引用文件', files.referencedFiles || []]];
+        const note = el('div', 'muted', t().fileNote); box.append(note);
+        const groups = [[t().changedFiles, files.changedFiles || []], [t().referencedFiles, files.referencedFiles || []]];
         for (const [title, rows] of groups) {
           box.append(el('h4', '', `${title} · ${rows.length}`));
-          if (!rows.length) box.append(el('div', 'muted', '未从会话记录中发现'));
+          if (!rows.length) box.append(el('div', 'muted', t().noFiles));
           for (const row of rows) {
             const line = el('div', 'file-row');
             line.append(el('span', 'path', row.path));
-            const copy = el('button', 'link', '复制路径');
+            const copy = el('button', 'link', t().copyPath);
             copy.type = 'button'; copy.addEventListener('click', () => copyText(row.path));
             line.append(copy); box.append(line);
           }
@@ -274,37 +367,37 @@
       function render() {
         const sessions = filteredSessions();
         $('list').replaceChildren();
-        $('count').textContent = `${sessions.length} 个会话`;
-        $('selection').textContent = state.selected.size ? `· 已选 ${state.selected.size}` : '';
+        $('count').textContent = t().sessions(sessions.length);
+        $('selection').textContent = state.selected.size ? t().selected(state.selected.size) : '';
         $('archive').disabled = !state.selected.size || state.loading;
         $('delete').disabled = !state.selected.size || state.loading;
-        if (!sessions.length) { $('list').append(el('div', 'empty', state.loading ? '正在读取会话…' : '没有符合条件的会话')); return; }
+        if (!sessions.length) { $('list').append(el('div', 'empty', state.loading ? t().loading : t().empty)); return; }
         for (const session of sessions) {
           const card = el('article', `card${session.current ? ' current' : ''}`);
           const checkbox = document.createElement('input'); checkbox.type = 'checkbox';
           checkbox.checked = state.selected.has(session.id); checkbox.disabled = !session.deletable || state.loading;
-          checkbox.title = session.current || session.protected ? '当前管理会话受保护' : session.ephemeral ? '临时会话不可删除' : '选择会话';
+          checkbox.title = session.current || session.protected ? t().protected : session.ephemeral ? t().ephemeralProtected : t().selectSession;
           checkbox.addEventListener('change', () => { checkbox.checked ? state.selected.add(session.id) : state.selected.delete(session.id); render(); });
           card.append(checkbox);
 
           const body = el('div'); const titleRow = el('div', 'title-row'); titleRow.append(el('div', 'title', session.title));
-          if (session.current) titleRow.append(el('span', 'badge current', '当前会话'));
-          if (session.archived) titleRow.append(el('span', 'badge', '已归档'));
-          if (session.ephemeral) titleRow.append(el('span', 'badge', '临时'));
-          for (const tag of session.tags || []) titleRow.append(el('span', `badge${tag.key === 'hidden-fork' ? ' warning' : ''}`, tag.label));
+          if (session.current) titleRow.append(el('span', 'badge current', t().currentSession));
+          if (session.archived) titleRow.append(el('span', 'badge', t().archived));
+          if (session.ephemeral) titleRow.append(el('span', 'badge', t().ephemeral));
+          for (const tag of session.tags || []) titleRow.append(el('span', `badge${tag.key === 'hidden-fork' ? ' warning' : ''}`, tagLabel(tag)));
           body.append(titleRow);
           if (session.preview && session.preview !== session.title) body.append(el('div', 'preview', session.preview));
           const meta = el('div', 'meta');
-          meta.append(el('span', 'path', session.cwd || '项目路径未知'));
-          if (session.branch) meta.append(el('span', '', `分支 ${session.branch}`));
+          meta.append(el('span', 'path', session.cwd || t().unknownProject));
+          if (session.branch) meta.append(el('span', '', t().branch(session.branch)));
           meta.append(el('span', '', formatTime(session.updatedAt)));
-          if (session.descendantCount) meta.append(el('span', '', `${session.descendantCount} 个派生会话`));
-          if (session.blockingForkCount) meta.append(el('span', '', `${session.blockingForkCount} 个引用分叉阻止源会话删除`));
-          if (session.historyBaseThreadId) meta.append(el('span', '', `引用源 ${session.historyBaseThreadId}`));
+          if (session.descendantCount) meta.append(el('span', '', t().descendants(session.descendantCount)));
+          if (session.blockingForkCount) meta.append(el('span', '', t().blockers(session.blockingForkCount)));
+          if (session.historyBaseThreadId) meta.append(el('span', '', t().source(session.historyBaseThreadId)));
           body.append(meta); card.append(body);
 
           const side = el('div', 'side');
-          const inspect = el('button', 'link', state.files.has(session.id) ? '收起文件' : '查看文件'); inspect.type = 'button';
+          const inspect = el('button', 'link', state.files.has(session.id) ? t().collapseFiles : t().inspectFiles); inspect.type = 'button';
           inspect.addEventListener('click', async () => {
             if (state.files.has(session.id)) { state.files.delete(session.id); render(); return; }
             state.files.set(session.id, 'loading'); render();
@@ -313,7 +406,7 @@
             render();
           });
           side.append(inspect);
-          if (session.cwd) { const copy = el('button', 'link', '复制项目路径'); copy.type='button'; copy.addEventListener('click', () => copyText(session.cwd)); side.append(copy); }
+          if (session.cwd) { const copy = el('button', 'link', t().copyProject); copy.type='button'; copy.addEventListener('click', () => copyText(session.cwd)); side.append(copy); }
           card.append(side); renderFiles(card, session); $('list').append(card);
         }
       }
@@ -340,17 +433,17 @@
       async function copyText(text) {
         // 选区复制必须在用户点击的同步调用栈内执行，否则受限 iframe 可能丢失用户手势。
         if (copyTextWithSelection(text)) {
-          showToast('路径已复制');
+          showToast(t().copied);
           return;
         }
         try {
           if (navigator.clipboard?.writeText) {
             await navigator.clipboard.writeText(text);
-            showToast('路径已复制');
+            showToast(t().copied);
             return;
           }
         } catch {}
-        showToast('无法访问剪贴板，请手动复制');
+        showToast(t().copyFailed);
       }
 
       async function refresh() {
@@ -366,26 +459,26 @@
         try {
           const data = await tool('archive_sessions', { threadIds: [...state.selected] });
           const failed = (data.results || []).filter(r => !r.ok);
-          showToast(failed.length ? `${failed.length} 个会话归档失败：${failed[0].error || '未知错误'}` : '所选会话已归档');
+          showToast(failed.length ? t().archiveFailed(failed.length, failed[0].error || t().unknownError) : t().archivedSuccess);
           state.selected.clear(); await refresh();
         } catch (error) { showToast(error.message); }
         finally { state.loading = false; render(); }
       }
 
       function openDelete() {
-        $('deleteCount').textContent = state.selected.size; $('confirmation').value = ''; $('confirmDelete').disabled = true;
+        $('deleteHeading').textContent = t().deleteHeading(state.selected.size); $('confirmation').value = ''; $('confirmDelete').disabled = true;
         $('deleteDialog').showModal(); setTimeout(() => $('confirmation').focus(), 30);
       }
 
       async function performDelete(event) {
         event.preventDefault();
-        if ($('confirmation').value !== '永久删除') return;
+        if ($('confirmation').value !== t().confirmation) return;
         $('deleteDialog').close(); state.loading = true; render();
         try {
-          const data = await tool('delete_sessions', { threadIds: [...state.selected], confirmation: '永久删除' });
+          const data = await tool('delete_sessions', { threadIds: [...state.selected], confirmation: t().confirmation });
           const failed = (data.results || []).filter(r => !r.ok);
           const syncFailed = data.sidebarSync && !data.sidebarSync.ok;
-          showToast(failed.length ? `${failed.length} 个会话删除失败：${failed[0].error || '未知错误'}` : syncFailed ? '会话已删除；侧边栏同步失败，请刷新或重启 Codex' : '所选会话已永久删除，侧边栏已同步');
+          showToast(failed.length ? t().deleteFailed(failed.length, failed[0].error || t().unknownError) : syncFailed ? t().sidebarSyncFailed : t().deletedSuccess);
           state.selected.clear(); await refresh();
         } catch (error) { showToast(error.message); }
         finally { state.loading = false; render(); }
@@ -407,10 +500,11 @@
       $('refresh').addEventListener('click', refresh);
       $('archive').addEventListener('click', archiveSelected);
       $('delete').addEventListener('click', openDelete);
-      $('confirmation').addEventListener('input', event => { $('confirmDelete').disabled = event.target.value !== '永久删除'; });
+      $('cancelDelete').addEventListener('click', () => $('deleteDialog').close());
+      $('confirmation').addEventListener('input', event => { $('confirmDelete').disabled = event.target.value !== t().confirmation; });
       $('deleteForm').addEventListener('submit', performDelete);
 
-      render();
+      applyLocale(); render();
       setTimeout(() => { if (!state.sessions.length) refresh(); }, 500);
     })();
   </script>
