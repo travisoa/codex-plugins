@@ -1159,6 +1159,91 @@ class InteractivePickerTests(unittest.TestCase):
         self.assertIn(f"一次最多处理 {server.BATCH_LIMIT} 个会话", outcome["note"])
 
 
+class ElicitationLocaleTests(unittest.TestCase):
+    """表单直接呈现给用户，不经模型转述，必须跟随宿主语言。"""
+
+    def setUp(self):
+        self.original_app = server.APP
+        self.original_request = server.HOST.request
+        self.original_scan = server._scan_history_base_threads
+        server._scan_history_base_threads = lambda: []
+        server._HOST.clear()
+        server._MANAGER_CONTEXTS.clear()
+        server.APP = FakeApp(active=[
+            {"id": f"t-{i}", "name": f"Session {i}", "cwd": "/tmp/demo",
+             "source": "vscode", "updatedAt": 100 - i}
+            for i in range(3)
+        ])
+        server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"capabilities": {"elicitation": {"form": {}}}},
+        })
+        self.prompts = []
+
+    def tearDown(self):
+        server.APP = self.original_app
+        server.HOST.request = self.original_request
+        server._scan_history_base_threads = self.original_scan
+        server._HOST.clear()
+        server._MANAGER_CONTEXTS.clear()
+
+    def run_flow(self, meta):
+        queue = [
+            {"action": "accept", "content": {"scope": "all", "datePreset": "all", "tag": ""}},
+            {"action": "accept", "content": {"selection": "1"}},
+            {"action": "accept", "content": {"action": "cancel"}},
+        ]
+        def fake(method, params, timeout=120.0):
+            self.prompts.append(params)
+            return queue[len(self.prompts) - 1]
+        server.HOST.request = fake
+        server.call_tool("select_sessions", {}, meta)
+
+    def test_an_english_host_gets_english_forms(self):
+        self.run_flow({"openai/threadId": "mgr", "openai/locale": "en-US"})
+        filter_form, pick_form, action_form = self.prompts
+        self.assertIn("Choose filters first", filter_form["message"])
+        self.assertEqual(
+            filter_form["requestedSchema"]["properties"]["scope"]["enumNames"],
+            ["All", "Current", "Archived"],
+        )
+        self.assertEqual(
+            filter_form["requestedSchema"]["properties"]["tag"]["enumNames"][0], "Any"
+        )
+        self.assertIn("sessions matched", pick_form["message"])
+        self.assertIn(
+            "Permanently delete",
+            " ".join(action_form["requestedSchema"]["properties"]["action"]["enumNames"]),
+        )
+        # 英文界面里不该混入中文标点或词句。
+        for form in self.prompts:
+            self.assertNotIn("：", json.dumps(form, ensure_ascii=False))
+            self.assertNotIn("会话", json.dumps(form, ensure_ascii=False))
+
+    def test_a_chinese_host_gets_chinese_forms(self):
+        self.run_flow({"openai/threadId": "mgr", "openai/locale": "zh-CN"})
+        self.assertIn("请先选择筛选条件", self.prompts[0]["message"])
+        self.assertEqual(
+            self.prompts[0]["requestedSchema"]["properties"]["scope"]["enumNames"],
+            ["全部", "当前", "已归档"],
+        )
+
+    def test_category_tags_are_localised_too(self):
+        server._HOST["locale"] = "en"
+        self.assertEqual(server._tag_label("plugin-development"), "Plugin development")
+        server._HOST["locale"] = "zh"
+        self.assertEqual(server._tag_label("plugin-development"), "插件开发")
+
+    def test_selection_errors_follow_the_host_language(self):
+        sessions = [{"id": "t-0"}]
+        server._HOST["locale"] = "en"
+        with self.assertRaisesRegex(ValueError, "outside 1-1"):
+            server._parse_selection("9", sessions)
+        server._HOST["locale"] = "zh"
+        with self.assertRaisesRegex(ValueError, "超出范围"):
+            server._parse_selection("9", sessions)
+
+
 class ElicitationConfirmTests(unittest.TestCase):
     """CLI 类宿主上，删除前必须由用户在表单里敲定最终名单。"""
 

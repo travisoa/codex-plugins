@@ -1206,6 +1206,136 @@ def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -
 # 逐字段渲染的宿主上，字段太多会让用户按很多次回车，超过就改用整体确认。
 ELICIT_FIELD_LIMIT = 8
 # 序号输入只占一个字段，候选分页列出，避免一次塞进过长的提示语。
+TAG_LABELS_EN = {
+    "hidden-fork": "Hidden fork",
+    "session-management": "Session management",
+    "automation": "Automation",
+    "plugin-development": "Plugin development",
+    "lark": "Lark collaboration",
+    "documents": "Documents & sheets",
+    "media": "Images & video",
+    "development": "Code development",
+    "general": "General",
+}
+
+ELICIT_TEXT = {
+    "zh": {
+        "filterMessage": lambda total: f"共 {total} 个可管理会话。请先选择筛选条件，随后从结果中选择要处理的会话。",
+        "scope": "会话范围",
+        "scopeNames": ["全部", "当前", "已归档"],
+        "date": "最后更新时间",
+        "dateNames": ["不限", "1 天内", "1 周内", "1 个月内", "1 周前（更早）", "1 个月前（更早）", "3 个月前（更早）"],
+        "tag": "类别标签",
+        "anyTag": "不限",
+        "tagCount": lambda label, count: f"{label}（{count}）",
+        "matched": lambda total: f"筛选到 {total} 个会话",
+        "colon": "：",
+        "pageInfo": lambda page, pages, first, last: f"（第 {page}/{pages} 页，显示第 {first}-{last} 个）",
+        "chosenSummary": lambda count, numbers: f"已选 {count} 个：{numbers}",
+        "pickHintPaged": "输入序号可累加选择（如 1,3,5-7；all 选全部，clear 清空）；选择下一页/上一页可继续浏览，选择“完成选择”提交。",
+        "pickHintSingle": "请输入要处理的序号（此步只做选择，不会归档或删除）。",
+        "pickTitle": lambda total: f"要处理的序号（1-{total}）",
+        "pickDescription": "多个用逗号分隔，可用区间；留空表示不新增选择。",
+        "pageField": "翻页 / 提交",
+        "pageNames": ["完成选择", "下一页", "上一页"],
+        "lastPage": "已经是最后一页。",
+        "firstPage": "已经是第一页。",
+        "protectedRows": lambda numbers: f"第 {numbers} 项是当前会话或受保护会话，不能操作，请重新输入。",
+        "retry": lambda reason: f"{reason}请重新输入。",
+        "unnamed": "未命名会话",
+        "unknownPath": "未知项目路径",
+        "hiddenFork": "隐藏分叉",
+        "archived": "已归档",
+        "ephemeral": "临时",
+        "descendants": lambda count: f"连带 {count} 个派生会话",
+        "blockedBy": lambda count: f"被 {count} 个分叉引用",
+        "currentRow": "（当前会话，受保护）",
+        "ephemeralRow": "（临时会话，不可操作）",
+        "protectedRow": "（不可操作）",
+        "actionMessage": lambda count: f"已选择 {count} 个会话，请选择要执行的操作。",
+        "actionField": "操作",
+        "actionNames": lambda count: [
+            "取消，不做任何操作", f"归档这 {count} 个会话", f"永久删除这 {count} 个会话（不可撤销）",
+        ],
+        "confirmMessage": lambda count: f"即将永久删除以下 {count} 个会话，请把要删除的选为 True（不可撤销，项目文件不受影响）。",
+        "confirmBulk": lambda count, preview: f"即将永久删除 {count} 个会话，例如：{preview}……",
+        "confirmBulkTitle": lambda count: f"确认永久删除这 {count} 个会话？",
+        "confirmBulkDescription": "此操作不可撤销；如需逐个挑选，请先缩小选择范围。",
+        "confirmBulkNames": lambda count: ["取消", f"确认删除全部 {count} 个"],
+        "outOfRange": lambda number, total: f"序号 {number} 超出范围 1-{total}。",
+        "unparsable": lambda chunk: f"无法识别的序号“{chunk}”，请输入如 1,3,5-7 的形式。",
+    },
+    "en": {
+        "filterMessage": lambda total: f"{total} sessions available. Choose filters first, then pick the ones to act on.",
+        "scope": "Session scope",
+        "scopeNames": ["All", "Current", "Archived"],
+        "date": "Last updated",
+        "dateNames": ["Any", "Within 1 day", "Within 1 week", "Within 1 month", "Over 1 week ago", "Over 1 month ago", "Over 3 months ago"],
+        "tag": "Category tag",
+        "anyTag": "Any",
+        "tagCount": lambda label, count: f"{label} ({count})",
+        "matched": lambda total: f"{total} sessions matched",
+        "colon": ":",
+        "pageInfo": lambda page, pages, first, last: f" (page {page}/{pages}, showing {first}-{last})",
+        "chosenSummary": lambda count, numbers: f"{count} selected: {numbers}",
+        "pickHintPaged": "Type numbers to add to the selection (e.g. 1,3,5-7; all selects everything, clear resets); use next/previous page to browse, then choose Done to submit.",
+        "pickHintSingle": "Type the numbers to act on (this step only selects; nothing is archived or deleted).",
+        "pickTitle": lambda total: f"Numbers to act on (1-{total})",
+        "pickDescription": "Comma-separated, ranges allowed; leave empty to add nothing.",
+        "pageField": "Page / submit",
+        "pageNames": ["Done", "Next page", "Previous page"],
+        "lastPage": "Already on the last page.",
+        "firstPage": "Already on the first page.",
+        "protectedRows": lambda numbers: f"Item {numbers} is the current or a protected session and cannot be acted on. Please re-enter.",
+        "retry": lambda reason: f"{reason} Please re-enter.",
+        "unnamed": "Untitled session",
+        "unknownPath": "Unknown project path",
+        "hiddenFork": "hidden fork",
+        "archived": "archived",
+        "ephemeral": "temporary",
+        "descendants": lambda count: f"takes {count} derived session(s) with it",
+        "blockedBy": lambda count: f"referenced by {count} fork(s)",
+        "currentRow": " (current session, protected)",
+        "ephemeralRow": " (temporary session, not actionable)",
+        "protectedRow": " (not actionable)",
+        "actionMessage": lambda count: f"{count} session(s) selected. Choose what to do.",
+        "actionField": "Action",
+        "actionNames": lambda count: [
+            "Cancel, do nothing", f"Archive these {count}", f"Permanently delete these {count} (cannot be undone)",
+        ],
+        "confirmMessage": lambda count: f"About to permanently delete {count} session(s). Set the ones to delete to True (cannot be undone; project files are untouched).",
+        "confirmBulk": lambda count, preview: f"About to permanently delete {count} sessions, for example: {preview}…",
+        "confirmBulkTitle": lambda count: f"Permanently delete these {count} sessions?",
+        "confirmBulkDescription": "This cannot be undone. To pick individually, narrow the selection first.",
+        "confirmBulkNames": lambda count: ["Cancel", f"Delete all {count}"],
+        "outOfRange": lambda number, total: f"Number {number} is outside 1-{total}.",
+        "unparsable": lambda chunk: f"Cannot read \"{chunk}\"; use a form like 1,3,5-7.",
+    },
+}
+
+
+def _elicit_locale() -> str:
+    """宿主给了语言就用它，否则跟随进程环境，最后回落中文。"""
+    value = _HOST.get("locale")
+    if value in ("zh", "en"):
+        return str(value)
+    for name in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        raw = os.environ.get(name)
+        if raw:
+            return "zh" if raw.lower().startswith("zh") else "en"
+    return "zh"
+
+
+def _t() -> dict[str, Any]:
+    return ELICIT_TEXT[_elicit_locale()]
+
+
+def _tag_label(key: str) -> str:
+    if _elicit_locale() == "en":
+        return TAG_LABELS_EN.get(key, TAG_LABELS.get(key, key))
+    return TAG_LABELS.get(key, key)
+
+
 BATCH_LIMIT = 100
 PICK_PAGE_SIZE = 10
 # 只为挡住异常宿主造成的死循环，正常翻页远达不到这个次数。
@@ -1214,19 +1344,20 @@ PICK_MAX_ROUNDS = 500
 
 def _elicit_target_labels(thread_id: str, item: dict[str, Any]) -> tuple[str, str]:
     """与管理页卡片保持同样的判断依据：影响删除范围的信息都要能看到。"""
-    title = str(item.get("title") or "未命名会话")
+    copy = _t()
+    title = str(item.get("title") or copy["unnamed"])
     # 删除确认要能分辨同名项目，所以用完整路径而不是目录名。
-    parts = [str(item.get("cwd") or "未知项目路径"), _format_timestamp(item.get("updatedAt"))]
+    parts = [str(item.get("cwd") or copy["unknownPath"]), _format_timestamp(item.get("updatedAt"))]
     if item.get("hiddenFromList"):
-        parts.append("隐藏分叉")
+        parts.append(copy["hiddenFork"])
     if item.get("archived"):
-        parts.append("已归档")
+        parts.append(copy["archived"])
     if item.get("ephemeral"):
-        parts.append("临时")
+        parts.append(copy["ephemeral"])
     if item.get("descendantCount"):
-        parts.append(f"连带 {item['descendantCount']} 个派生会话")
+        parts.append(copy["descendants"](item["descendantCount"]))
     if item.get("blockingForkCount"):
-        parts.append(f"被 {item['blockingForkCount']} 个分叉引用")
+        parts.append(copy["blockedBy"](item["blockingForkCount"]))
     parts.append(thread_id[:8])
     return title, " · ".join(parts)
 
@@ -1258,24 +1389,25 @@ def _confirm_delete_targets(
                 "default": False,
             }
         params = {
-            "message": f"即将永久删除以下 {len(ids)} 个会话，请把要删除的选为 True（不可撤销，项目文件不受影响）。",
+            "message": _t()["confirmMessage"](len(ids)),
             "requestedSchema": {"type": "object", "properties": properties},
         }
     else:
         preview = "；".join(
             _elicit_target_labels(thread_id, by_id.get(thread_id, {}))[0] for thread_id in ids[:5]
         )
+        copy = _t()
         params = {
-            "message": f"即将永久删除 {len(ids)} 个会话，例如：{preview}……",
+            "message": copy["confirmBulk"](len(ids), preview),
             "requestedSchema": {
                 "type": "object",
                 "properties": {
                     "confirm": {
                         "type": "string",
-                        "title": f"确认永久删除这 {len(ids)} 个会话？",
-                        "description": "此操作不可撤销；如需逐个挑选，请先缩小选择范围。",
+                        "title": copy["confirmBulkTitle"](len(ids)),
+                        "description": copy["confirmBulkDescription"],
                         "enum": ["cancel", "delete_all"],
-                        "enumNames": ["取消", f"确认删除全部 {len(ids)} 个"],
+                        "enumNames": copy["confirmBulkNames"](len(ids)),
                     }
                 },
                 "required": ["confirm"],
@@ -1318,31 +1450,32 @@ DATE_PRESET_LABELS = {
 def _elicit_filter(available_tags: list[dict[str, Any]], total: int) -> dict[str, str] | None:
     """第一段：先把上百个会话收窄到能逐条勾选的规模。"""
     tag_keys = [""] + [str(tag.get("key")) for tag in available_tags]
-    tag_names = ["不限"] + [
-        f"{tag.get('label')}（{tag.get('count')}）" for tag in available_tags
+    copy = _t()
+    tag_names = [copy["anyTag"]] + [
+        copy["tagCount"](_tag_label(str(tag.get("key"))), tag.get("count")) for tag in available_tags
     ]
     params = {
-        "message": f"共 {total} 个可管理会话。请先选择筛选条件，随后从结果中勾选要处理的会话。",
+        "message": copy["filterMessage"](total),
         "requestedSchema": {
             "type": "object",
             "properties": {
                 "scope": {
                     "type": "string",
-                    "title": "会话范围",
+                    "title": copy["scope"],
                     "enum": ["all", "active", "archived"],
-                    "enumNames": ["全部", "当前", "已归档"],
+                    "enumNames": copy["scopeNames"],
                     "default": "all",
                 },
                 "datePreset": {
                     "type": "string",
-                    "title": "最后更新时间",
+                    "title": copy["date"],
                     "enum": list(DATE_PRESET_LABELS),
-                    "enumNames": list(DATE_PRESET_LABELS.values()),
+                    "enumNames": copy["dateNames"],
                     "default": "all",
                 },
                 "tag": {
                     "type": "string",
-                    "title": "类别标签",
+                    "title": copy["tag"],
                     "enum": tag_keys,
                     "enumNames": tag_names,
                     "default": "",
@@ -1387,10 +1520,10 @@ def _parse_selection(raw: Any, sessions: list[dict[str, Any]]) -> list[str]:
         elif chunk.isdigit():
             numbers = range(int(chunk), int(chunk) + 1)
         else:
-            raise ValueError(f"无法识别的序号“{chunk}”，请输入如 1,3,5-7 的形式。")
+            raise ValueError(_t()["unparsable"](chunk))
         for number in numbers:
             if not 1 <= number <= len(sessions):
-                raise ValueError(f"序号 {number} 超出范围 1-{len(sessions)}。")
+                raise ValueError(_t()["outOfRange"](number, len(sessions)))
             thread_id = sessions[number - 1]["id"]
             if thread_id not in picked:
                 picked.append(thread_id)
@@ -1403,12 +1536,13 @@ SELECT_ALL_WORDS = {"all", "全部", "*"}
 
 def _pick_row(index: int, item: dict[str, Any], chosen: bool) -> str:
     title, detail = _elicit_target_labels(item["id"], item)
+    copy = _t()
     if item.get("current"):
-        mark, suffix = "⊘", "（当前会话，受保护）"
+        mark, suffix = "⊘", copy["currentRow"]
     elif item.get("ephemeral"):
-        mark, suffix = "⊘", "（临时会话，不可操作）"
+        mark, suffix = "⊘", copy["ephemeralRow"]
     elif not item.get("deletable"):
-        mark, suffix = "⊘", "（不可操作）"
+        mark, suffix = "⊘", copy["protectedRow"]
     else:
         mark, suffix = ("✓" if chosen else "·"), ""
     return f"{index}. {mark} {title}{suffix} — {detail}"
@@ -1427,10 +1561,11 @@ def _pick_message(
     lines = []
     if warning:
         lines.extend([f"⚠ {warning}", ""])
-    header = f"筛选到 {len(sessions)} 个会话"
+    copy = _t()
+    header = copy["matched"](len(sessions))
     if pages > 1:
-        header += f"（第 {page + 1}/{pages} 页，显示第 {first + 1}-{first + len(window)} 个）"
-    lines.append(header + "：")
+        header += copy["pageInfo"](page + 1, pages, first + 1, first + len(window))
+    lines.append(header + copy["colon"])
     for offset, item in enumerate(window, start=first + 1):
         lines.append(_pick_row(offset, item, item["id"] in chosen))
     lines.append("")
@@ -1440,12 +1575,8 @@ def _pick_message(
             for index, item in enumerate(sessions, start=1)
             if item["id"] in chosen
         ]
-        lines.append(f"已选 {len(selected)} 个：{', '.join(numbers)}")
-    lines.append(
-        "输入序号可累加选择（如 1,3,5-7；all 选全部，clear 清空）；"
-        + ("选择下一页/上一页可继续浏览，" if pages > 1 else "")
-        + "选择“完成选择”提交。"
-    )
+        lines.append(copy["chosenSummary"](len(selected), ", ".join(numbers)))
+    lines.append(copy["pickHintPaged"] if pages > 1 else copy["pickHintSingle"])
     return "\n".join(lines)
 
 
@@ -1456,19 +1587,20 @@ def _elicit_pick(sessions: list[dict[str, Any]]) -> tuple[list[str] | None, str 
     warning = ""
     selected: list[str] = []
     for _ in range(PICK_MAX_ROUNDS):
+        copy = _t()
         properties: dict[str, Any] = {
             "selection": {
                 "type": "string",
-                "title": f"要处理的序号（1-{len(sessions)}）",
-                "description": "多个用逗号分隔，可用区间；留空表示不新增选择。",
+                "title": copy["pickTitle"](len(sessions)),
+                "description": copy["pickDescription"],
             }
         }
         if pages > 1:
             properties["page"] = {
                 "type": "string",
-                "title": "翻页 / 提交",
+                "title": copy["pageField"],
                 "enum": ["done", "next", "prev"],
-                "enumNames": ["完成选择", "下一页", "上一页"],
+                "enumNames": copy["pageNames"],
                 "default": "done",
             }
         params = {
@@ -1494,7 +1626,7 @@ def _elicit_pick(sessions: list[dict[str, Any]]) -> tuple[list[str] | None, str 
             try:
                 picked = _parse_selection(written, sessions)
             except ValueError as exc:
-                warning = f"{exc}请重新输入。"
+                warning = copy["retry"](str(exc))
                 continue
             by_id = {item["id"]: item for item in sessions}
             if written.lower() in SELECT_ALL_WORDS:
@@ -1509,7 +1641,7 @@ def _elicit_pick(sessions: list[dict[str, Any]]) -> tuple[list[str] | None, str 
             ]
             if blocked:
                 labels = "、".join(str(number) for number in blocked[:3])
-                warning = f"第 {labels} 项是当前会话或受保护会话，不能操作，请重新输入。"
+                warning = copy["protectedRows"](labels)
                 continue
             for thread_id in picked:
                 if thread_id not in selected and thread_id in by_id:
@@ -1517,11 +1649,11 @@ def _elicit_pick(sessions: list[dict[str, Any]]) -> tuple[list[str] | None, str 
 
         move = str(content.get("page") or "done")
         if move == "next":
-            warning = "已经是最后一页。" if page >= pages - 1 else ""
+            warning = copy["lastPage"] if page >= pages - 1 else ""
             page = min(page + 1, pages - 1)
             continue
         if move == "prev":
-            warning = "已经是第一页。" if page == 0 else ""
+            warning = copy["firstPage"] if page == 0 else ""
             page = max(page - 1, 0)
             continue
         return selected, None
@@ -1530,20 +1662,17 @@ def _elicit_pick(sessions: list[dict[str, Any]]) -> tuple[list[str] | None, str 
 
 def _elicit_action(count: int) -> str:
     """第三段：让用户直接选操作，默认取消。"""
+    copy = _t()
     params = {
-        "message": f"已选择 {count} 个会话，请选择要执行的操作。",
+        "message": copy["actionMessage"](count),
         "requestedSchema": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "title": "操作",
+                    "title": copy["actionField"],
                     "enum": ["cancel", "archive", "delete"],
-                    "enumNames": [
-                        "取消，不做任何操作",
-                        f"归档这 {count} 个会话",
-                        f"永久删除这 {count} 个会话（不可撤销）",
-                    ],
+                    "enumNames": copy["actionNames"](count),
                     "default": "cancel",
                 }
             },
@@ -1851,6 +1980,9 @@ def _text_result(data: dict[str, Any], summary: str) -> dict[str, Any]:
 
 
 def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]:
+    locale = _locale_from_meta(meta)
+    if locale:
+        _HOST["locale"] = locale
     if name == "open_session_manager":
         current_id = _thread_id_from_meta(meta)
         manager_context = _create_manager_context(current_id)

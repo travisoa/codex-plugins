@@ -217,8 +217,8 @@ def pad(text: str, width: int) -> str:
 
 
 def format_time(value: Any, copy: dict[str, Any]) -> str:
-    server = sys.modules.get(SERVER_MODULE)
-    seconds = server._timestamp_seconds(value) if server else None
+    # 走 load_server() 而不是翻 sys.modules：模块名改了也不会静默退化成“时间未知”。
+    seconds = load_server()._timestamp_seconds(value)
     if seconds is None:
         return copy["unknownTime"]
     return datetime.fromtimestamp(seconds).strftime("%Y-%m-%d %H:%M")
