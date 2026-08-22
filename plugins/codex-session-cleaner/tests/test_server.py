@@ -1076,6 +1076,41 @@ class InteractivePickerTests(unittest.TestCase):
         self.assertNotIn("selectedThreadIds", outcome)
         self.assertIn("没有勾选", outcome["note"])
 
+    def test_the_listing_matches_what_the_manager_page_would_show(self):
+        """两条路径共用 list_sessions，派生会话同样不单独出现，判断依据也要齐。"""
+        server.APP = FakeApp(active=[
+            {"id": "root-1", "name": "顶层会话", "cwd": "/tmp/a", "updatedAt": 90},
+            {"id": "sub-1", "name": "子代理审查", "cwd": "/tmp/a",
+             "parentThreadId": "root-1", "updatedAt": 80},
+            {"id": "sub-2", "name": "子代理压缩", "cwd": "/tmp/a",
+             "source": {"subAgent": {"threadSpawn": {"parentThreadId": "root-1"}}}, "updatedAt": 70},
+            {"id": "root-2", "name": "另一个顶层", "cwd": "/tmp/b", "updatedAt": 60},
+            {"id": "temp-1", "name": "临时问答", "cwd": "/tmp/a",
+             "ephemeral": True, "updatedAt": 50},
+        ])
+        server._scan_history_base_threads = lambda: [{
+            "id": "fork-1", "name": "隐藏分叉", "cwd": "/tmp/b", "archived": False,
+            "historyBaseThreadId": "root-2", "hiddenFromList": True, "updatedAt": 55,
+        }]
+        server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"capabilities": self.CLI},
+        })
+        self.answers(self.FILTER_OK, {"action": "accept", "content": {"selection": ""}})
+        server.call_tool("open_session_manager", {}, {"threadId": "root-1"})
+        listing = self.prompts[1]["message"]
+
+        # 子代理会话不单独出现，和管理页一致。
+        self.assertNotIn("子代理审查", listing)
+        self.assertNotIn("子代理压缩", listing)
+        # 但它们的存在要通过派生数量体现出来，否则看不出删除的影响面。
+        self.assertIn("连带 2 个派生会话", listing)
+        # 管理页会高亮的这几类状态，命令行同样要标出来。
+        self.assertIn("隐藏分叉", listing)
+        self.assertIn("被 1 个分叉引用", listing)
+        self.assertIn("（临时会话，不可操作）", listing)
+        self.assertIn("（当前会话，受保护）", listing)
+
     def test_hosts_with_a_manager_page_keep_the_component_flow(self):
         self.host(3, capabilities={"ui": {}, "elicitation": {"form": {}}})
         self.answers({"action": "decline"})

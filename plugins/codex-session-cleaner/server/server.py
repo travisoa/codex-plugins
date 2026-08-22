@@ -1208,13 +1208,20 @@ def _should_elicit() -> bool:
 
 
 def _elicit_target_labels(thread_id: str, item: dict[str, Any]) -> tuple[str, str]:
+    """与管理页卡片保持同样的判断依据：影响删除范围的信息都要能看到。"""
     title = str(item.get("title") or "未命名会话")
     # 删除确认要能分辨同名项目，所以用完整路径而不是目录名。
     parts = [str(item.get("cwd") or "未知项目路径"), _format_timestamp(item.get("updatedAt"))]
+    if item.get("hiddenFromList"):
+        parts.append("隐藏分叉")
     if item.get("archived"):
         parts.append("已归档")
+    if item.get("ephemeral"):
+        parts.append("临时")
+    if item.get("descendantCount"):
+        parts.append(f"连带 {item['descendantCount']} 个派生会话")
     if item.get("blockingForkCount"):
-        parts.append(f"{item['blockingForkCount']} 个引用分叉")
+        parts.append(f"被 {item['blockingForkCount']} 个分叉引用")
     parts.append(thread_id[:8])
     return title, " · ".join(parts)
 
@@ -1389,6 +1396,8 @@ def _pick_row(index: int, item: dict[str, Any], chosen: bool) -> str:
     title, detail = _elicit_target_labels(item["id"], item)
     if item.get("current"):
         mark, suffix = "⊘", "（当前会话，受保护）"
+    elif item.get("ephemeral"):
+        mark, suffix = "⊘", "（临时会话，不可操作）"
     elif not item.get("deletable"):
         mark, suffix = "⊘", "（不可操作）"
     else:
