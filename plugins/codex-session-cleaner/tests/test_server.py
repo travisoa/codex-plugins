@@ -56,6 +56,10 @@ class SessionCleanerTests(unittest.TestCase):
         self.original_history_scan = server._scan_history_base_threads
         server._MANAGER_CONTEXTS.clear()
         server._HOST.clear()
+        self.original_notify = server._notify_desktop_sidebar
+        server._notify_desktop_sidebar = lambda ids, cwd_by_id: {
+            "available": False, "notifiedThreadIds": [], "error": None
+        }
         server._scan_history_base_threads = lambda: []
         server.sync_desktop_sidebar = lambda ids, cwd_by_id: {
             "ok": True,
@@ -70,6 +74,7 @@ class SessionCleanerTests(unittest.TestCase):
         server._scan_history_base_threads = self.original_history_scan
         server._MANAGER_CONTEXTS.clear()
         server._HOST.clear()
+        server._notify_desktop_sidebar = self.original_notify
 
     def test_extracts_thread_id_from_supported_metadata(self):
         self.assertEqual(server._thread_id_from_meta({"openai/threadId": "abc"}), "abc")
@@ -433,6 +438,56 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertFalse(by_id["manager"]["ok"])
         self.assertIn("当前管理会话", by_id["manager"]["error"])
         self.assertFalse(any(method == "thread/archive" for method, _ in server.APP.calls))
+
+    def test_archiving_notifies_the_desktop_sidebar(self):
+        """只调 thread/archive 的话，桌面端侧边栏不会刷新，会话看着还在活动列表里。"""
+        server.APP = FakeApp(active=[
+            {"id": "root", "name": "Root", "cwd": "/tmp/project", "source": "vscode"},
+            {"id": "other", "name": "Other", "cwd": "/tmp/second", "source": "vscode"},
+        ])
+        notified = {}
+        server._notify_desktop_sidebar = lambda ids, cwd_by_id: notified.update(
+            ids=list(ids), cwd=dict(cwd_by_id)
+        ) or {"available": True, "notifiedThreadIds": list(ids), "error": None}
+        try:
+            data = server.archive_sessions(["root", "other"], "manager")
+        finally:
+            server._notify_desktop_sidebar = self.original_notify
+        self.assertEqual(notified["ids"], ["root", "other"])
+        self.assertEqual(notified["cwd"]["root"], "/tmp/project")
+        self.assertTrue(data["sidebarSync"]["ok"])
+
+    def test_a_failed_archive_is_not_announced_to_the_sidebar(self):
+        server.APP = FakeApp(active=[
+            {"id": "root", "name": "Root", "cwd": "/tmp/project", "source": "vscode"},
+        ])
+        seen = {}
+        server._notify_desktop_sidebar = lambda ids, cwd_by_id: seen.update(ids=list(ids)) or {
+            "available": True, "notifiedThreadIds": [], "error": None
+        }
+        try:
+            # ghost 不在可管理列表里，归档会失败，不该被当成已归档广播出去。
+            data = server.archive_sessions(["root", "ghost"], "manager")
+        finally:
+            server._notify_desktop_sidebar = self.original_notify
+        self.assertEqual(seen["ids"], ["root"])
+        self.assertFalse([r for r in data["results"] if r["threadId"] == "ghost"][0]["ok"])
+
+    def test_a_sidebar_failure_surfaces_in_the_archive_summary(self):
+        server.APP = FakeApp(active=[
+            {"id": "root", "name": "Root", "cwd": "/tmp/project", "source": "vscode"},
+        ])
+        server._notify_desktop_sidebar = lambda ids, cwd_by_id: {
+            "available": True, "notifiedThreadIds": [], "error": "Codex 桌面 IPC 已断开。"
+        }
+        try:
+            result = server.call_tool(
+                "archive_sessions", {"threadIds": ["root"]}, {"threadId": "manager"}
+            )
+        finally:
+            server._notify_desktop_sidebar = self.original_notify
+        self.assertFalse(result["structuredContent"]["sidebarSync"]["ok"])
+        self.assertIn("侧边栏同步未完全成功", result["content"][0]["text"])
 
     def test_archive_still_accepts_top_level_threads(self):
         server.APP = FakeApp(active=[

@@ -1072,6 +1072,7 @@ def archive_sessions(ids: list[str], current_id: str | None) -> dict[str, Any]:
     # 复用删除路径的可管理性判断：必须是列表中的顶层会话，且不是当前会话或临时会话。
     by_id = {item["id"]: item for item in list_sessions(current_id, "all", "")["sessions"]}
     results = []
+    archived_ids: list[str] = []
     for thread_id in ids:
         item = by_id.get(thread_id)
         if thread_id == current_id:
@@ -1087,10 +1088,25 @@ def archive_sessions(ids: list[str], current_id: str | None) -> dict[str, Any]:
             continue
         try:
             APP.request("thread/archive", {"threadId": thread_id})
+            archived_ids.append(thread_id)
             results.append({"threadId": thread_id, "ok": True})
         except Exception as exc:
             results.append({"threadId": thread_id, "ok": False, "error": str(exc)})
-    return {"operation": "archive", "results": results}
+    # 归档只改状态、不删数据，因此只广播通知，不动桌面目录里的条目。
+    cwd_by_id = {
+        thread_id: str((by_id.get(thread_id) or {}).get("cwd") or "")
+        for thread_id in archived_ids
+    }
+    notification = _notify_desktop_sidebar(archived_ids, cwd_by_id)
+    return {
+        "operation": "archive",
+        "results": results,
+        "sidebarSync": {
+            "ok": not notification.get("error"),
+            "notification": notification,
+            "warnings": [notification["error"]] if notification.get("error") else [],
+        },
+    }
 
 
 def _history_reference_map(history_threads: list[dict[str, Any]]) -> dict[str, list[str]]:
@@ -1676,8 +1692,7 @@ def _run_picked_action(
         return
     outcome["performed"] = action
     outcome["results"] = result.get("results") or []
-    if action == "delete":
-        outcome["sidebarSync"] = result.get("sidebarSync")
+    outcome["sidebarSync"] = result.get("sidebarSync")
     failed = [row for row in outcome["results"] if not row.get("ok")]
     label = "归档" if action == "archive" else "永久删除"
     outcome["note"] = (
@@ -2001,7 +2016,10 @@ def call_tool(name: str, arguments: dict[str, Any], meta: Any) -> dict[str, Any]
     if name == "archive_sessions":
         current_id, _ = _current_id_for_call(meta, arguments, require=True)
         data = archive_sessions(_validate_ids(arguments.get("threadIds")), current_id)
-        return _text_result(data, _operation_text(data, "归档"))
+        summary = _operation_text(data, "归档")
+        if not data["sidebarSync"]["ok"]:
+            summary += "\n侧边栏同步未完全成功；请刷新或重启 Codex。"
+        return _text_result(data, summary)
     if name == "delete_sessions":
         current_id, _ = _current_id_for_call(meta, arguments, require=True)
         data = delete_sessions(
