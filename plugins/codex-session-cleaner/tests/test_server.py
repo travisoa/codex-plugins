@@ -639,6 +639,25 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertIn("共 80 个可管理 Codex 会话", body)
         self.assertIn("另有 50 个会话未列出", body)
 
+    def test_the_next_step_is_stated_first_and_as_an_instruction(self):
+        """提示压在上百行列表末尾、写成“可以…”，模型会当成可选建议而停下。"""
+        server.APP = FakeApp(active=[
+            {"id": f"t-{i}", "name": f"会话 {i}", "cwd": "/tmp", "updatedAt": 100 - i}
+            for i in range(40)
+        ])
+        server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"capabilities": {"elicitation": {"form": {}}}},
+        })
+        body = server.call_tool("open_session_manager", {}, {"openai/threadId": "m"})["content"][0]["text"]
+        head = body.split("\n")[0]
+        self.assertIn("【下一步】", head)
+        self.assertIn("select_sessions", head)
+        self.assertIn("请立即调用", head)
+        self.assertIn("不要在此停下等待", head)
+        # 指令必须在会话清单之前，不能被列表淹没。
+        self.assertLess(body.index("select_sessions"), body.index("1. ["))
+
     def test_text_fallback_points_at_the_right_affordance(self):
         server.APP = FakeApp(active=[{"id": "t", "name": "n", "cwd": "/tmp", "updatedAt": 1}])
 

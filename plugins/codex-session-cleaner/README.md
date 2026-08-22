@@ -157,8 +157,8 @@ codex plugin list
 结构化的文本会话列表而不是管理页，`inspect_session_files`、`archive_sessions` 和 `delete_sessions`
 也会返回逐条的文本结果，因此这些工具在纯命令行环境下同样可用。
 
-此类客户端若同时支持 MCP `elicitation`（Codex CLI 即是），文本列表末尾会提示可以调用 `select_sessions`
-进入交互式操作。该工具弹出三步表单：
+此类客户端若同时支持 MCP `elicitation`（Codex CLI 即是），文本列表**开头**会给出明确的下一步指示，
+要求模型立即调用 `select_sessions` 而不是把清单丢给用户后停下等待。该工具弹出三步表单：
 
 1. **筛选**：会话范围、最后更新时间、类别标签（标签选项按实际会话数量生成）；
 2. **选择**：把筛选结果按每页 10 个编号列出，用一个输入框收多选结果，支持 `1,3`、`5-7`、`all`，`clear` 清空重选；

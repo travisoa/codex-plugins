@@ -1811,13 +1811,21 @@ def _record_host(params: Any) -> None:
     _HOST["protocolVersion"] = params.get("protocolVersion")
 
 
-def _tui_hint() -> str:
-    """只有渲染不了管理页组件的客户端会读到这段文本，无需再判断宿主类型。"""
+def _next_step_hint() -> str:
+    """只有渲染不了管理页组件的客户端会读到这段文本，无需再判断宿主类型。
+
+    放在列表前面并写成祈使句：压在上百行列表末尾的“可以…”会被当成可选建议，
+    模型就会停下来等用户再说一次。
+    """
     if _host_supports_elicitation():
-        return "\n\n如需勾选式批量操作，可调用 select_sessions 进入交互式筛选、选择与操作。"
+        return (
+            "【下一步】当前客户端没有渲染出管理页，以下为文本列表。"
+            "若用户想归档或删除，请立即调用 select_sessions，由用户在交互表单中筛选、选择并确认操作；"
+            "不要让用户手动报会话编号，也不要在此停下等待进一步指示。\n\n"
+        )
     return (
-        "\n\n当前客户端既不能渲染管理页组件，也不支持交互表单。"
-        "需要勾选式批量操作时，可在终端运行插件目录下的 scripts/launch_tui.sh。"
+        "【下一步】当前客户端既不能渲染管理页组件，也不支持交互表单。"
+        "需要勾选式批量操作时，请告知用户在终端运行插件目录下的 scripts/launch_tui.sh。\n\n"
     )
 
 
@@ -1855,7 +1863,7 @@ def _sessions_text(data: dict[str, Any], limit: int = 30) -> str:
     sessions = data.get("sessions") or []
     total = data.get("total", len(sessions))
     if not sessions:
-        return "没有符合条件的 Codex 会话。" + _tui_hint()
+        return _next_step_hint() + "没有符合条件的 Codex 会话。"
     shown = sessions[:limit]
     lines = [f"共 {total} 个可管理 Codex 会话" + (f"，以下为前 {len(shown)} 个：" if total > len(shown) else "：")]
     for index, item in enumerate(shown, start=1):
@@ -1865,7 +1873,7 @@ def _sessions_text(data: dict[str, Any], limit: int = 30) -> str:
     available = data.get("availableTags") or []
     if available:
         lines.append("可用标签：" + "、".join(f"{tag['label']}({tag['count']})" for tag in available))
-    return "\n".join(lines) + _tui_hint()
+    return _next_step_hint() + "\n".join(lines)
 
 
 def _operation_text(data: dict[str, Any], action: str) -> str:
