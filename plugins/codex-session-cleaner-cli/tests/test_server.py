@@ -822,6 +822,9 @@ class InteractivePickerTests(unittest.TestCase):
         core.sync_desktop_sidebar = lambda ids, cwd_by_id: {"ok": True, "warnings": []}
         core._MANAGER_CONTEXTS.clear()
         core._HOST.clear()
+        # 表单文案在宿主没给语言时会跟随 LANG，这些用例断言的是中文文案；
+        # 不钉住语言，在英文环境的机器上会整片失败。
+        core._HOST["locale"] = "zh"
         self.prompts = []
 
     def tearDown(self):
