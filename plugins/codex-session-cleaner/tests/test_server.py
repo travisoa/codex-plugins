@@ -1189,6 +1189,49 @@ class ManagerBootstrapTests(unittest.TestCase):
         self.assertIn("scopeActive: '未归档'", html)
         self.assertIn("scopeActive: 'Not archived'", html)
 
+class ListReuseTests(unittest.TestCase):
+    """删除后紧接着的刷新不能把整列表换成新节点，否则视图会跳回开头。"""
+
+    def html(self):
+        return server.UI_PATH.read_text(encoding="utf-8")
+
+    def test_the_listing_is_updated_in_place_not_rebuilt(self):
+        """整列表重建会让页面高度先坍缩再恢复，宿主据此调整 iframe 高度，滚动就复位。"""
+        html = self.html()
+        self.assertIn("function renderList(sessions)", html)
+        self.assertIn("card.dataset.sessionId = session.id", html)
+        self.assertIn("card.dataset.signature = signature", html)
+        # 只有空列表才允许整体替换；有会话时必须走按 id 复用的路径。
+        self.assertNotIn("$('list').replaceChildren()", html)
+        list_rebuilds = html.count("list.replaceChildren(") + html.count("$('list').replaceChildren(")
+        self.assertEqual(list_rebuilds, 1, "列表只应在空态时整体替换")
+        self.assertIn(
+            "list.replaceChildren(el('div', 'empty', state.loading ? t().loading : t().empty));",
+            html,
+        )
+
+    def test_removing_the_cursor_card_advances_the_cursor_first(self):
+        """摘掉游标所指的卡片而不先让位，insertBefore 会抛错，整轮渲染断在半路。"""
+        html = self.html()
+        body = html[html.index("function renderList(sessions)"):]
+        body = body[: body.index("\n      function render()")]
+        advance = body.index("if (card === cursor) cursor = cursor.nextSibling;\n            card.remove();")
+        insert = body.index("list.insertBefore(card, cursor);")
+        self.assertLess(advance, insert)
+
+    def test_checkbox_state_is_synced_without_rebuilding_the_card(self):
+        """勾选若走重建，连续勾选会作用在已被替换掉的节点上，选择就丢了。"""
+        html = self.html()
+        self.assertIn("checkbox.checked = state.selected.has(session.id);", html)
+        self.assertIn("checkbox.disabled = !session.deletable || state.loading;", html)
+        signature = html[html.index("const signature = JSON.stringify("):]
+        signature = signature[: signature.index("\n")]
+        # 签名只认会话数据、文件线索和语言；勾选与 loading 不进签名，否则每次都重建。
+        self.assertIn("state.files.get(session.id)", signature)
+        self.assertIn("state.locale", signature)
+        self.assertNotIn("state.selected", signature)
+        self.assertNotIn("state.loading", signature)
+
 
 if __name__ == "__main__":
     unittest.main()

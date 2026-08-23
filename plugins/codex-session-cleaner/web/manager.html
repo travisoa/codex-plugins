@@ -400,57 +400,100 @@
         container.append(box);
       }
 
+      function buildCard(session) {
+        const card = el('article', `card${session.current ? ' current' : ''}`);
+        const checkbox = document.createElement('input'); checkbox.type = 'checkbox';
+        checkbox.checked = state.selected.has(session.id); checkbox.disabled = !session.deletable || state.loading;
+        checkbox.title = session.busy ? t().busyHint : session.current || session.protected ? t().protected : session.ephemeral ? t().ephemeralProtected : t().selectSession;
+        checkbox.addEventListener('change', () => { checkbox.checked ? state.selected.add(session.id) : state.selected.delete(session.id); render(); });
+        card.append(checkbox);
+
+        const body = el('div'); const titleRow = el('div', 'title-row'); titleRow.append(el('div', 'title', session.title));
+        if (session.current) titleRow.append(el('span', 'badge current', t().currentSession));
+        if (session.archived) titleRow.append(el('span', 'badge', t().archived));
+        if (session.ephemeral) titleRow.append(el('span', 'badge', t().ephemeral));
+        if (session.busy) { const b = el('span', 'badge warning', t().busy); b.title = t().busyHint; titleRow.append(b); }
+        for (const tag of session.tags || []) titleRow.append(el('span', `badge${tag.key === 'hidden-fork' ? ' warning' : ''}`, tagLabel(tag)));
+        body.append(titleRow);
+        if (session.preview && session.preview !== session.title) body.append(el('div', 'preview', session.preview));
+        const meta = el('div', 'meta');
+        meta.append(el('span', 'path', session.cwd || t().unknownProject));
+        if (session.branch) meta.append(el('span', '', t().branch(session.branch)));
+        meta.append(el('span', '', formatTime(session.updatedAt)));
+        if (session.descendantCount) meta.append(el('span', '', t().descendants(session.descendantCount)));
+        if (session.blockingForkCount) meta.append(el('span', '', t().blockers(session.blockingForkCount)));
+        if (session.historyBaseThreadId) meta.append(el('span', '', t().source(session.historyBaseThreadId)));
+        body.append(meta); card.append(body);
+
+        const side = el('div', 'side');
+        const inspect = el('button', 'link', state.files.has(session.id) ? t().collapseFiles : t().inspectFiles); inspect.type = 'button';
+        inspect.addEventListener('click', async () => {
+          if (state.files.has(session.id)) { state.files.delete(session.id); render(); return; }
+          state.files.set(session.id, 'loading'); render();
+          try { state.files.set(session.id, await tool('inspect_session_files', { threadId: session.id })); }
+          catch (error) { state.files.set(session.id, { error: error.message }); }
+          render();
+        });
+        side.append(inspect);
+        if (session.cwd) { const copy = el('button', 'link', t().copyProject); copy.type='button'; copy.addEventListener('click', () => copyText(session.cwd)); side.append(copy); }
+        const copyId = el('button', 'link', t().copySessionId); copyId.type = 'button';
+        copyId.title = session.id;
+        copyId.addEventListener('click', () => copyText(session.id));
+        side.append(copyId);
+        card.append(side); renderFiles(card, session);
+        return card;
+      }
+
+      // 删除后紧接着的 refresh 会拿回一份全新的会话数组；整列表重建会把每张卡片
+      // 都换成新节点，页面高度先坍缩再恢复，宿主据此调整 iframe 高度，外层滚动就被
+      // 带回开头。按 id 复用节点后，只有真正消失的那几张被移除，其余原地不动，下方
+      // 内容自然上移，滚动位置也就留在原处。
+      function renderList(sessions) {
+        const list = $('list');
+        if (!sessions.length) {
+          list.replaceChildren(el('div', 'empty', state.loading ? t().loading : t().empty));
+          return;
+        }
+        const existing = new Map();
+        for (const node of [...list.children]) {
+          if (node.dataset.sessionId) existing.set(node.dataset.sessionId, node);
+          else node.remove();  // 之前的“没有会话”占位
+        }
+        let cursor = list.firstChild;
+        for (const session of sessions) {
+          const signature = JSON.stringify([session, state.files.get(session.id) ?? null, state.locale]);
+          let card = existing.get(session.id);
+          existing.delete(session.id);
+          if (card && card.dataset.signature !== signature) {
+            // 游标就指着这张卡片时，先让游标前移：摘掉它之后游标会脱离列表，
+            // 后面的 insertBefore 会因为参照节点不在列表里而抛错，整轮渲染就断在半路。
+            if (card === cursor) cursor = cursor.nextSibling;
+            card.remove();
+            card = null;
+          }
+          if (!card) {
+            card = buildCard(session);
+            card.dataset.sessionId = session.id;
+            card.dataset.signature = signature;
+          }
+          // 勾选与禁用每次都可能变，单独同步，不必为它们重建整张卡片。
+          const checkbox = card.querySelector('input[type=checkbox]');
+          checkbox.checked = state.selected.has(session.id);
+          checkbox.disabled = !session.deletable || state.loading;
+          if (card === cursor) cursor = cursor.nextSibling;
+          else list.insertBefore(card, cursor);
+        }
+        for (const node of existing.values()) node.remove();
+      }
+
       function render() {
         const sessions = filteredSessions();
         const selection = visibleSelection(sessions);
-        $('list').replaceChildren();
         $('count').textContent = t().sessions(sessions.length);
         $('selection').textContent = selection.length ? t().selected(selection.length) : '';
         $('archive').disabled = !selection.length || state.loading;
         $('delete').disabled = !selection.length || state.loading;
-        if (!sessions.length) { $('list').append(el('div', 'empty', state.loading ? t().loading : t().empty)); return; }
-        for (const session of sessions) {
-          const card = el('article', `card${session.current ? ' current' : ''}`);
-          const checkbox = document.createElement('input'); checkbox.type = 'checkbox';
-          checkbox.checked = state.selected.has(session.id); checkbox.disabled = !session.deletable || state.loading;
-          checkbox.title = session.busy ? t().busyHint : session.current || session.protected ? t().protected : session.ephemeral ? t().ephemeralProtected : t().selectSession;
-          checkbox.addEventListener('change', () => { checkbox.checked ? state.selected.add(session.id) : state.selected.delete(session.id); render(); });
-          card.append(checkbox);
-
-          const body = el('div'); const titleRow = el('div', 'title-row'); titleRow.append(el('div', 'title', session.title));
-          if (session.current) titleRow.append(el('span', 'badge current', t().currentSession));
-          if (session.archived) titleRow.append(el('span', 'badge', t().archived));
-          if (session.ephemeral) titleRow.append(el('span', 'badge', t().ephemeral));
-          if (session.busy) { const b = el('span', 'badge warning', t().busy); b.title = t().busyHint; titleRow.append(b); }
-          for (const tag of session.tags || []) titleRow.append(el('span', `badge${tag.key === 'hidden-fork' ? ' warning' : ''}`, tagLabel(tag)));
-          body.append(titleRow);
-          if (session.preview && session.preview !== session.title) body.append(el('div', 'preview', session.preview));
-          const meta = el('div', 'meta');
-          meta.append(el('span', 'path', session.cwd || t().unknownProject));
-          if (session.branch) meta.append(el('span', '', t().branch(session.branch)));
-          meta.append(el('span', '', formatTime(session.updatedAt)));
-          if (session.descendantCount) meta.append(el('span', '', t().descendants(session.descendantCount)));
-          if (session.blockingForkCount) meta.append(el('span', '', t().blockers(session.blockingForkCount)));
-          if (session.historyBaseThreadId) meta.append(el('span', '', t().source(session.historyBaseThreadId)));
-          body.append(meta); card.append(body);
-
-          const side = el('div', 'side');
-          const inspect = el('button', 'link', state.files.has(session.id) ? t().collapseFiles : t().inspectFiles); inspect.type = 'button';
-          inspect.addEventListener('click', async () => {
-            if (state.files.has(session.id)) { state.files.delete(session.id); render(); return; }
-            state.files.set(session.id, 'loading'); render();
-            try { state.files.set(session.id, await tool('inspect_session_files', { threadId: session.id })); }
-            catch (error) { state.files.set(session.id, { error: error.message }); }
-            render();
-          });
-          side.append(inspect);
-          if (session.cwd) { const copy = el('button', 'link', t().copyProject); copy.type='button'; copy.addEventListener('click', () => copyText(session.cwd)); side.append(copy); }
-          const copyId = el('button', 'link', t().copySessionId); copyId.type = 'button';
-          copyId.title = session.id;
-          copyId.addEventListener('click', () => copyText(session.id));
-          side.append(copyId);
-          card.append(side); renderFiles(card, session); $('list').append(card);
-        }
+        renderList(sessions);
       }
 
       function copyTextWithSelection(text) {
