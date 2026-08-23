@@ -218,6 +218,35 @@ class ServerReuseTests(unittest.TestCase):
         state.toggle_current()
         self.assertIn("已选 1", state.summary())
 
+class ConfirmationTests(unittest.TestCase):
+    """打错确认词和主动取消必须能分辨，否则用户不知道刚才发生了什么。"""
+
+    def _tui(self, verdict):
+        state = tui.TuiState(locale="zh")
+        state.sessions = [session("a")]
+        state.selected = {"a"}
+        screen = FakeScreen(60, 20)
+        instance = tui.SessionTui(screen, server, state)
+        instance.confirm_delete = lambda count: verdict
+        instance.reload = lambda: None
+        return instance, state
+
+    def test_a_mistyped_confirmation_says_so(self):
+        instance, state = self._tui("mismatch")
+        instance.delete()
+        self.assertIn("确认词不匹配", state.status)
+        self.assertEqual(state.selected, {"a"})  # 选择保留，用户可以直接重试
+
+    def test_an_explicit_cancel_says_cancelled(self):
+        instance, state = self._tui("cancel")
+        instance.delete()
+        self.assertEqual(state.status, "已取消删除")
+
+    def test_the_confirmation_word_must_match_exactly(self):
+        copy = tui.TEXT["en"]
+        self.assertEqual(copy["confirmWord"], "delete")
+        self.assertIn("delete", copy["confirmMismatch"](copy["confirmWord"]))
+
 
 if __name__ == "__main__":
     unittest.main()

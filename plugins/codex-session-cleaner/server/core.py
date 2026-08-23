@@ -9,7 +9,6 @@ thin server.py and shares this file verbatim.
 
 from __future__ import annotations
 
-import atexit
 import calendar
 import fcntl
 import json
@@ -38,6 +37,8 @@ SOURCE_KINDS = [
     "subAgentCompact", "subAgentThreadSpawn", "subAgentOther", "unknown",
 ]
 MANAGER_CONTEXT_TTL_SECONDS = 2 * 60 * 60
+# 每个版本自报操作入口的名字：共享文案不能把命令行版用户指向不存在的管理页。
+SURFACE_LABEL = "Codex 会话管理页"
 DATE_PRESETS = {
     "all",
     "within_1_day",
@@ -198,6 +199,77 @@ def _write_message(message: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
+class StdinLines:
+    """The one reader of stdin, so nothing waits on bytes it already holds.
+
+    `sys.stdin.readline()` pulls a whole chunk out of the pipe, so a second
+    message written alongside the first lands in Python's buffer where a
+    `select` on the raw descriptor can no longer see it. Waiting on select
+    alone would then sit out the full elicitation timeout with the user's
+    answer already in hand. Buffering here instead keeps every line visible:
+    a pending line is returned before select is ever consulted.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._closed = False
+
+    @staticmethod
+    def _descriptor() -> int | None:
+        """None when stdin cannot be selected on (a test double, say)."""
+        try:
+            descriptor = sys.stdin.fileno()
+        except (AttributeError, OSError, ValueError):
+            return None
+        return descriptor if isinstance(descriptor, int) and descriptor >= 0 else None
+
+    def _pending_line(self) -> str | None:
+        end = self._buffer.find("\n")
+        if end < 0:
+            return None
+        line, self._buffer = self._buffer[: end + 1], self._buffer[end + 1 :]
+        return line
+
+    def readline(self, timeout: float | None = None) -> str | None:
+        """One line; "" once stdin is closed; None if `timeout` ran out first."""
+        line = self._pending_line()
+        if line is not None:
+            return line
+        descriptor = self._descriptor()
+        if descriptor is None:
+            # 没有 fd 就没法等，只能阻塞读；超时在这条路径上无从实现。
+            return sys.stdin.readline()
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if self._closed:
+                line, self._buffer = self._buffer, ""
+                return line
+            if deadline is None:
+                wait: float = 0.25
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                wait = min(0.25, remaining)
+            ready, _, _ = select.select([descriptor], [], [], wait)
+            if not ready:
+                continue
+            try:
+                chunk = os.read(descriptor, 65536)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                self._closed = True
+                continue
+            self._buffer += chunk.decode("utf-8", "replace")
+            line = self._pending_line()
+            if line is not None:
+                return line
+
+
+STDIN = StdinLines()
+
+
 class HostBridge:
     """Reverse JSON-RPC channel to the MCP host, used for elicitation.
 
@@ -219,14 +291,9 @@ class HostBridge:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise HostError(f"等待宿主响应 {method} 超时。")
-            try:
-                # readline 会无界阻塞，必须先等可读再读，否则 timeout 形同虚设。
-                ready, _, _ = select.select([sys.stdin], [], [], min(0.25, remaining))
-            except (OSError, ValueError):
-                ready = [sys.stdin]  # stdin 不支持 select 时退回阻塞读
-            if not ready:
-                continue
-            line = sys.stdin.readline()
+            line = STDIN.readline(remaining)
+            if line is None:
+                continue  # 这一轮没等到，回去重算剩余时间
             if not line:
                 raise HostError("宿主连接已关闭。")
             try:
@@ -502,17 +569,17 @@ def _current_id_for_call(
         _purge_manager_contexts()
         context = _MANAGER_CONTEXTS.get(token)
         if context is None:
-            raise ValueError("管理页上下文已失效，请重新打开 Codex 会话管理页。")
+            raise ValueError(f"上下文已失效，请重新打开 {SURFACE_LABEL}。")
         context_id, _ = context
         if current_id and current_id != context_id:
-            raise ValueError("管理页上下文与当前任务不一致，请重新打开会话管理页。")
+            raise ValueError(f"上下文与当前任务不一致，请重新打开 {SURFACE_LABEL}。")
         _MANAGER_CONTEXTS[token] = (
             context_id,
             time.monotonic() + MANAGER_CONTEXT_TTL_SECONDS,
         )
         return context_id, token
     if require and not current_id:
-        raise ValueError("缺少当前任务上下文；为避免误操作，请重新打开 Codex 会话管理页。")
+        raise ValueError(f"缺少当前任务上下文；为避免误操作，请重新打开 {SURFACE_LABEL}。")
     return current_id, None
 
 
@@ -760,6 +827,37 @@ def _scan_history_base_threads() -> list[dict[str, Any]]:
     return list(records.values())
 
 
+HISTORY_CACHE_TTL_SECONDS = 5.0
+_HISTORY_CACHE: dict[str, Any] = {"at": 0.0, "scan": None, "threads": None}
+
+
+def _history_threads() -> list[dict[str, Any]]:
+    """The history-base scan, reused for a few seconds at a time.
+
+    The scan walks every rollout file under CODEX_HOME and opens each one to
+    read its first line, so paying for it on every refresh, every listing and
+    every archive is the bulk of a listing's cost. Fork topology only changes
+    when a session is created or removed, so a few seconds of reuse costs
+    nothing in accuracy; archive and delete drop the entry outright.
+    """
+    scan = _scan_history_base_threads  # 认函数本身，测试替换后立刻生效
+    now = time.monotonic()
+    cached = _HISTORY_CACHE["threads"]
+    if (
+        cached is not None
+        and _HISTORY_CACHE["scan"] is scan
+        and now - _HISTORY_CACHE["at"] < HISTORY_CACHE_TTL_SECONDS
+    ):
+        return cached
+    threads = scan()
+    _HISTORY_CACHE.update({"at": now, "scan": scan, "threads": threads})
+    return threads
+
+
+def _forget_history_threads() -> None:
+    _HISTORY_CACHE.update({"at": 0.0, "scan": None, "threads": None})
+
+
 def _tag(key: str) -> dict[str, str]:
     return {"key": key, "label": TAG_LABELS[key]}
 
@@ -838,7 +936,8 @@ def _matches_search_filter(item: dict[str, Any], search: str) -> bool:
 
 def _normalize_thread(thread: dict[str, Any], archived: bool, current_id: str | None) -> dict[str, Any]:
     cwd = str(thread.get("cwd") or "")
-    git = thread.get("gitInfo") if isinstance(thread.get("gitInfo"), dict) else {}
+    git = thread.get("gitInfo")
+    git = git if isinstance(git, dict) else {}
     preview = str(thread.get("preview") or "").strip().replace("\n", " ")
     title = str(thread.get("name") or "").strip() or preview[:90] or "未命名会话"
     return {
@@ -865,15 +964,24 @@ def _normalize_thread(thread: dict[str, Any], archived: bool, current_id: str | 
     }
 
 
-def _list_one(archived: bool) -> list[dict[str, Any]]:
-    """List every thread; searching happens locally so plugin-only fields stay matchable."""
+LIST_PAGE_LIMIT = 100
+LIST_MAX_PAGES = 50
+
+
+def _list_one(archived: bool) -> tuple[list[dict[str, Any]], bool]:
+    """List every thread, plus whether the page cap cut the walk short.
+
+    Searching happens locally so plugin-only fields stay matchable. The cap is
+    a runaway guard, not an intended limit, so report when it fires instead of
+    letting the caller present a short list as a complete one.
+    """
     output: list[dict[str, Any]] = []
     cursor: str | None = None
-    for _ in range(50):
+    for _ in range(LIST_MAX_PAGES):
         params: dict[str, Any] = {
             "archived": archived,
             "cursor": cursor,
-            "limit": 100,
+            "limit": LIST_PAGE_LIMIT,
             "sortKey": "updated_at",
             "sortDirection": "desc",
             "sourceKinds": SOURCE_KINDS,
@@ -884,8 +992,8 @@ def _list_one(archived: bool) -> list[dict[str, Any]]:
         output.extend(item for item in page if isinstance(item, dict))
         cursor = result.get("nextCursor") if isinstance(result, dict) else None
         if not cursor:
-            break
-    return output
+            return output, False
+    return output, bool(cursor)
 
 
 def list_sessions(
@@ -904,12 +1012,17 @@ def list_sessions(
         date_preset, custom_start, custom_end, now
     )
     raw: list[tuple[dict[str, Any], bool]] = []
+    truncated = False
     if scope in ("active", "all"):
-        raw.extend((item, False) for item in _list_one(False))
+        page, cut_short = _list_one(False)
+        raw.extend((item, False) for item in page)
+        truncated = truncated or cut_short
     if scope in ("archived", "all"):
-        raw.extend((item, True) for item in _list_one(True))
+        page, cut_short = _list_one(True)
+        raw.extend((item, True) for item in page)
+        truncated = truncated or cut_short
     if history_threads is None:
-        history_threads = _scan_history_base_threads()
+        history_threads = _history_threads()
     history_by_id = {str(item.get("id") or ""): item for item in history_threads}
     visible_ids = {str(item.get("id") or "") for item, _ in raw}
     for index, (thread, archived) in enumerate(raw):
@@ -986,7 +1099,7 @@ def list_sessions(
     return {
         "sessions": normalized,
         "total": len(normalized),
-        "truncated": False,
+        "truncated": truncated,
         "currentThreadId": current_id,
         "scope": scope,
         "search": search,
@@ -1081,6 +1194,12 @@ def _busy_thread_ids(thread_ids: set[str]) -> set[str]:
     The file lingering is not enough — most of them are stale — so probe the lock
     itself: if it cannot be taken, someone holds it. The probe takes the lock only
     long enough to learn that, then releases it.
+
+    Only a refused flock counts. Failing to open the file says nothing about who
+    holds the lock — a read-only or foreign-owned lock file would otherwise mark
+    a perfectly free session busy forever, and the plugin would keep sending the
+    user to a sidebar that has nothing to release. Opening read-only is enough:
+    flock does not care about the access mode.
     """
     directory = _codex_home() / "thread-writer-locks"
     if not directory.is_dir() or not thread_ids:
@@ -1090,21 +1209,22 @@ def _busy_thread_ids(thread_ids: set[str]) -> set[str]:
         lock = directory / f"{thread_id}.lock"
         if not lock.is_file():
             continue
-        handle = None
         try:
-            handle = os.open(lock, os.O_RDWR)
+            handle = os.open(lock, os.O_RDONLY | os.O_CLOEXEC)
+        except Exception:
+            continue  # 打不开说明不了谁持有锁，宁可让操作去试，也不误标
+        try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             fcntl.flock(handle, fcntl.LOCK_UN)
         except OSError:
             busy.add(thread_id)
         except Exception:
-            pass  # 探测不了就当作空闲，宁可让操作去试，也不误标
+            pass  # 探测不了同样当作空闲
         finally:
-            if handle is not None:
-                try:
-                    os.close(handle)
-                except OSError:
-                    pass
+            try:
+                os.close(handle)
+            except OSError:
+                pass
     return busy
 
 
@@ -1127,9 +1247,14 @@ def _validate_ids(value: Any) -> list[str]:
 
 def archive_sessions(ids: list[str], current_id: str | None) -> dict[str, Any]:
     if not current_id:
-        raise ValueError("缺少当前任务上下文；为避免误操作，请重新打开 Codex 会话管理页。")
+        raise ValueError(f"缺少当前任务上下文；为避免误操作，请重新打开 {SURFACE_LABEL}。")
     # 复用删除路径的可管理性判断：必须是列表中的顶层会话，且不是当前会话或临时会话。
-    by_id = {item["id"]: item for item in list_sessions(current_id, "all", "")["sessions"]}
+    by_id = {
+        item["id"]: item
+        for item in list_sessions(
+            current_id, "all", "", history_threads=_history_threads()
+        )["sessions"]
+    }
     results = []
     archived_ids: list[str] = []
     for thread_id in ids:
@@ -1159,6 +1284,8 @@ def archive_sessions(ids: list[str], current_id: str | None) -> dict[str, Any]:
         for thread_id in archived_ids
     }
     notification = _notify_desktop_sidebar(archived_ids, cwd_by_id)
+    if archived_ids:
+        _forget_history_threads()  # 归档会搬走 rollout 文件，缓存的扫描结果就过期了
     return {
         "operation": "archive",
         "results": results,
@@ -1220,10 +1347,10 @@ def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -
     if confirmation not in ("删除", "delete"):
         raise ValueError("确认词不正确，中文界面请输入“删除”，英文界面请输入“delete”。")
     if not current_id:
-        raise ValueError("缺少当前会话元数据；为避免误删，已拒绝操作。请从 Codex 会话管理页执行。")
+        raise ValueError(f"缺少当前会话元数据；为避免误删，已拒绝操作。请从 {SURFACE_LABEL} 执行。")
     if current_id in ids:
         raise ValueError("选中项包含当前管理会话，已拒绝整批删除。")
-    history_threads = _scan_history_base_threads()
+    history_threads = _history_threads()
     sessions = list_sessions(current_id, "all", "", history_threads=history_threads)["sessions"]
     by_id = {item["id"]: item for item in sessions}
     unavailable = [thread_id for thread_id in ids if thread_id not in by_id]
@@ -1273,6 +1400,8 @@ def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -
                 {"threadId": thread_id, "ok": False, "error": _friendly_thread_error(exc)}
             )
     cwd_by_id = {thread_id: str(by_id[thread_id].get("cwd") or "") for thread_id in deleted_ids}
+    if deleted_ids:
+        _forget_history_threads()  # 删除会移除 rollout 文件，缓存的扫描结果就过期了
     sidebar_sync = sync_desktop_sidebar(deleted_ids, cwd_by_id)
     return {
         "operation": "delete",
@@ -1334,6 +1463,11 @@ def _sessions_text(data: dict[str, Any], limit: int = 30, hint: str = "") -> str
         lines.extend(_session_line(index, item))
     if total > len(shown):
         lines.append(f"…… 另有 {total - len(shown)} 个会话未列出，可用 search、tag 或 datePreset 参数缩小范围。")
+    if data.get("truncated"):
+        lines.append(
+            f"注意：会话数量超过单次可读取的上限（每种状态 {LIST_MAX_PAGES * LIST_PAGE_LIMIT} 个），"
+            "更早的会话未纳入本次列表，请用 search、tag 或 datePreset 缩小范围后再确认。"
+        )
     available = data.get("availableTags") or []
     if available:
         lines.append("可用标签：" + "、".join(f"{tag['label']}({tag['count']})" for tag in available))
@@ -1400,6 +1534,8 @@ notify_desktop_sidebar = _notify_desktop_sidebar
 scan_history_base_threads = _scan_history_base_threads
 friendly_thread_error = _friendly_thread_error
 busy_thread_ids = _busy_thread_ids
+history_threads = _history_threads
+forget_history_threads = _forget_history_threads
 
 
 def build_handler(
@@ -1483,7 +1619,8 @@ def serve(
             _write_message(response)
 
     while True:
-        line = sys.stdin.readline()
+        # 与 elicitation 等待共用同一个缓冲，避免读走后半条消息看不见。
+        line = STDIN.readline()
         if not line:
             break
         run_one(line)

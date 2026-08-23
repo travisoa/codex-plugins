@@ -63,7 +63,7 @@ TEXT = {
         "date": "日期",
         "search": "搜索",
         "none": "－",
-        "scopes": {"all": "全部", "active": "当前", "archived": "已归档"},
+        "scopes": {"all": "全部", "active": "未归档", "archived": "已归档"},
         "dates": {
             "all": "不限",
             "within_1_day": "1 天内",
@@ -95,6 +95,8 @@ TEXT = {
         "deleteBody": "会一并删除派生会话和持久化元数据，此操作不可撤销。项目文件不会被删除。",
         "deletePrompt": lambda word: f"输入 {word} 确认（Esc 取消）：",
         "noSelection": "尚未选择任何会话",
+        "confirmMismatch": lambda word: f"确认词不匹配，需原样输入 {word}；未删除任何会话",
+        "deleteCancelled": "已取消删除",
         "archiving": "正在归档…",
         "deleting": "正在删除…",
         "archived_ok": "所选会话已归档",
@@ -116,7 +118,7 @@ TEXT = {
         "date": "Date",
         "search": "Search",
         "none": "-",
-        "scopes": {"all": "All", "active": "Current", "archived": "Archived"},
+        "scopes": {"all": "All", "active": "Not archived", "archived": "Archived"},
         "dates": {
             "all": "Any",
             "within_1_day": "Within 1 day",
@@ -148,6 +150,8 @@ TEXT = {
         "deleteBody": "Derived sessions and persisted metadata go too. This cannot be undone. Project files are kept.",
         "deletePrompt": lambda word: f"Type {word} to confirm (Esc to cancel): ",
         "noSelection": "Nothing selected yet",
+        "confirmMismatch": lambda word: f"Confirmation did not match; type {word} exactly. Nothing was deleted.",
+        "deleteCancelled": "Delete cancelled",
         "archiving": "Archiving…",
         "deleting": "Deleting…",
         "archived_ok": "Selected sessions archived",
@@ -590,7 +594,8 @@ class SessionTui:
             else:
                 return
 
-    def confirm_delete(self, count: int) -> bool:
+    def confirm_delete(self, count: int) -> str:
+        """"ok" / "cancel" / "mismatch" — 打错字和主动取消必须能分辨。"""
         copy = self.state.copy
         height, width = self.screen.getmaxyx()
         self.draw()
@@ -600,7 +605,9 @@ class SessionTui:
         self.screen.noutrefresh()
         curses.doupdate()
         answer = self.prompt(copy["deletePrompt"](copy["confirmWord"]))
-        return answer is not None and answer.strip() == copy["confirmWord"]
+        if answer is None:
+            return "cancel"
+        return "ok" if answer.strip() == copy["confirmWord"] else "mismatch"
 
     # ---- actions -----------------------------------------------------------
 
@@ -654,8 +661,12 @@ class SessionTui:
         if not targets:
             self.state.status = copy["noSelection"]
             return
-        if not self.confirm_delete(len(targets)):
-            self.state.status = ""
+        confirmed = self.confirm_delete(len(targets))
+        if confirmed != "ok":
+            self.state.status = (
+                copy["deleteCancelled"] if confirmed == "cancel"
+                else copy["confirmMismatch"](copy["confirmWord"])
+            )
             return
         self.state.status = copy["deleting"]
         self.draw()
@@ -741,6 +752,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     server = load_server()
+    # 共享文案默认指向管理页；终端界面既不是管理页也不是选择器，如实说自己。
+    server.SURFACE_LABEL = "Codex 会话清理器终端界面"
     state = build_state(args)
     try:
         curses.wrapper(lambda screen: SessionTui(screen, server, state).run())

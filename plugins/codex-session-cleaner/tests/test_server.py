@@ -1040,6 +1040,155 @@ class BusySessionTests(unittest.TestCase):
                 else:
                     os.environ["CODEX_HOME"] = previous
 
+class _StdinWithDescriptor:
+    """只暴露 fileno 的 stdin 替身，让 StdinLines 走真正的 select + os.read 路径。"""
+
+    def __init__(self, descriptor):
+        self._descriptor = descriptor
+
+    def fileno(self):
+        return self._descriptor
+
+
+class SharedCoreRegressionTests(unittest.TestCase):
+    """真出过问题的几处；改动共享核心时这些必须仍然成立。"""
+
+    def test_two_messages_in_one_write_are_both_delivered(self):
+        """宿主常把多条消息一次写出，第二条会留在缓冲里。
+
+        只靠 select 判断可读，就看不见这条已经读进来的消息：交互表单会一直空转到
+        超时，然后谎报“宿主没响应”，而用户其实早就答完了。
+        """
+        read_fd, write_fd = os.pipe()
+        write_open = True
+        original_stdin = sys.stdin
+        sys.stdin = _StdinWithDescriptor(read_fd)
+        try:
+            reader = core.StdinLines()
+            os.write(write_fd, b'{"id": "a"}\n{"id": "b"}\n')  # 同一次写入
+            self.assertEqual(reader.readline(2.0), '{"id": "a"}\n')
+            # 此刻 fd 上已无新数据，第二条只存在于缓冲里，必须照样立刻拿到。
+            self.assertEqual(reader.readline(2.0), '{"id": "b"}\n')
+            self.assertIsNone(reader.readline(0.05))  # 没有就是没有，超时返回 None
+            os.close(write_fd)
+            write_open = False
+            self.assertEqual(reader.readline(2.0), "")  # 关闭后才是空字符串
+        finally:
+            sys.stdin = original_stdin
+            os.close(read_fd)
+            if write_open:
+                os.close(write_fd)
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root 能打开任何文件")
+    def test_an_unreadable_lock_file_is_not_reported_as_busy(self):
+        """打不开锁文件说明不了谁持有它。
+
+        误判成占用，这个会话在页面和终端里都会永远不可勾选，而提示里让用户去侧边栏
+        释放的那个持有者根本不存在。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            locks = Path(tmp) / "thread-writer-locks"
+            locks.mkdir()
+            sealed = locks / "sealed.lock"
+            sealed.write_bytes(b"")
+            sealed.chmod(0o000)
+            previous = os.environ.get("CODEX_HOME")
+            os.environ["CODEX_HOME"] = tmp
+            try:
+                self.assertEqual(core._busy_thread_ids({"sealed"}), set())
+            finally:
+                sealed.chmod(0o644)
+                if previous is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = previous
+
+    def test_hitting_the_page_cap_is_reported_as_truncated(self):
+        """翻页上限是失控保护，不是容量承诺；截断了就得说出来。"""
+
+        class EndlessApp:
+            def __init__(self):
+                self.pages = 0
+
+            def request(self, method, params):
+                assert method == "thread/list", method
+                self.pages += 1
+                return {
+                    "data": [{"id": f"t{self.pages}", "name": "T", "updatedAt": self.pages}],
+                    "nextCursor": f"cursor-{self.pages}",
+                }
+
+        original_app, original_scan = core.APP, core._scan_history_base_threads
+        core.APP = EndlessApp()
+        core._scan_history_base_threads = lambda: []
+        core._forget_history_threads()
+        try:
+            data = core.list_sessions("mgr", "active")
+            self.assertEqual(len(data["sessions"]), core.LIST_MAX_PAGES)
+            self.assertTrue(data["truncated"])
+            self.assertIn("未纳入本次列表", core.sessions_text(data))
+        finally:
+            core.APP, core._scan_history_base_threads = original_app, original_scan
+            core._forget_history_threads()
+
+    def test_the_history_scan_is_reused_and_dropped_after_a_delete(self):
+        """扫描要读遍每个 rollout 文件，是列表开销的大头；但删除后必须重扫。"""
+        scans = []
+
+        def counted_scan():
+            scans.append(1)
+            return []
+
+        original_app, original_scan = core.APP, core._scan_history_base_threads
+        original_sync = core.sync_desktop_sidebar
+        core.APP = FakeApp(active=[{"id": "victim", "name": "Victim", "cwd": "/tmp/p"}])
+        core._scan_history_base_threads = counted_scan
+        core.sync_desktop_sidebar = lambda ids, cwd_by_id: {
+            "ok": True, "catalog": {}, "notification": {}, "warnings": []
+        }
+        core._forget_history_threads()
+        try:
+            core.list_sessions("mgr", "active")
+            core.list_sessions("mgr", "active")
+            self.assertEqual(len(scans), 1)  # 第二次列表复用同一份扫描结果
+            core.delete_sessions(["victim"], "删除", "mgr")
+            core.list_sessions("mgr", "active")
+            self.assertEqual(len(scans), 2)  # 删除复用列表那次，删完作废后才重扫
+        finally:
+            core.APP, core._scan_history_base_threads = original_app, original_scan
+            core.sync_desktop_sidebar = original_sync
+            core._forget_history_threads()
+
+class ManagerBootstrapTests(unittest.TestCase):
+    """没有上下文令牌时后端会把每一行都标成不可操作，这种列表不能盖掉好数据。"""
+
+    def html(self):
+        return server.UI_PATH.read_text(encoding="utf-8")
+
+    def test_bootstrap_waits_for_the_context_before_falling_back(self):
+        html = self.html()
+        self.assertIn("if (state.sessions.length || state.managerContext) return;", html)
+        self.assertNotIn("setTimeout(() => { if (!state.sessions.length) refresh(); }, 500);", html)
+
+    def test_a_refresh_that_started_without_a_context_is_discarded(self):
+        html = self.html()
+        self.assertIn("const contextAtStart = state.managerContext;", html)
+        self.assertIn("if (!contextAtStart && state.managerContext) {", html)
+        # 判断必须发生在把数据写进 state 之前，否则灰列表已经盖上去了。
+        refresh = html[html.index("async function refresh()"):]
+        refresh = refresh[: refresh.index("async function archiveSelected")]
+        self.assertLess(
+            refresh.index("if (!contextAtStart && state.managerContext)"),
+            refresh.index("applySessions(data);"),
+        )
+
+    def test_the_scope_button_says_what_it_filters(self):
+        """active 是“未归档”，写成“当前”会被读成“当前这个会话”。"""
+        html = self.html()
+        self.assertIn('<button data-scope="active">未归档</button>', html)
+        self.assertIn("scopeActive: '未归档'", html)
+        self.assertIn("scopeActive: 'Not archived'", html)
+
 
 if __name__ == "__main__":
     unittest.main()

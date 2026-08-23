@@ -37,7 +37,7 @@ ELICIT_TEXT = {
     "zh": {
         "filterMessage": lambda total: f"共 {total} 个可管理会话。请先选择筛选条件，随后从结果中选择要处理的会话。",
         "scope": "会话范围",
-        "scopeNames": ["全部", "当前", "已归档"],
+        "scopeNames": ["全部", "未归档", "已归档"],
         "date": "最后更新时间",
         "dateNames": ["不限", "1 天内", "1 周内", "1 个月内", "1 周前（更早）", "1 个月前（更早）", "3 个月前（更早）"],
         "tag": "类别标签",
@@ -82,7 +82,7 @@ ELICIT_TEXT = {
     "en": {
         "filterMessage": lambda total: f"{total} sessions available. Choose filters first, then pick the ones to act on.",
         "scope": "Session scope",
-        "scopeNames": ["All", "Current", "Archived"],
+        "scopeNames": ["All", "Not archived", "Archived"],
         "date": "Last updated",
         "dateNames": ["Any", "Within 1 day", "Within 1 week", "Within 1 month", "Over 1 week ago", "Over 1 month ago", "Over 3 months ago"],
         "tag": "Category tag",
@@ -395,7 +395,7 @@ def _elicit_pick(sessions: list[dict[str, Any]]) -> tuple[list[str] | None, str 
         else:
             warning = copy["firstPage"] if page == 0 else ""
             page = max(page - 1, 0)
-    return None, "多次输入未能确定选择，请重新打开会话管理页。"
+    return None, "多次输入未能确定选择，请重新运行 select_sessions。"
 
 
 def _elicit_page_move(
@@ -467,16 +467,16 @@ def _elicit_action(count: int) -> tuple[str, str | None]:
 def _run_picked_action(
     action: str, picked: list[str], current_id: str | None, outcome: dict[str, Any]
 ) -> None:
+    if action == "cancel":
+        outcome["performed"] = "none"
+        outcome["note"] = f"已选择 {len(picked)} 个会话，但你选择了取消，未做任何改动。"
+        return
     if len(picked) > core.BATCH_LIMIT:
         outcome["performed"] = "none"
         outcome["note"] = (
             f"一次最多处理 {core.BATCH_LIMIT} 个会话，本次选中 {len(picked)} 个；"
             "请缩小筛选范围后分批处理。"
         )
-        return
-    if action == "cancel":
-        outcome["performed"] = "none"
-        outcome["note"] = f"已选择 {len(picked)} 个会话，但你选择了取消，未做任何改动。"
         return
     try:
         if action == "archive":

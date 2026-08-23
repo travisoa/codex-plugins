@@ -21,6 +21,8 @@ import interactive
 
 
 SERVER_NAME = "codex-session-cleaner-cli"
+# 共享文案默认指向管理页；这一版没有管理页，改成本版真正存在的入口。
+core.SURFACE_LABEL = "Codex 会话选择器"
 
 
 def _desktop_edition_hint() -> str:
@@ -45,9 +47,7 @@ def _tool_definitions() -> list[dict[str, Any]]:
                 "命令行下管理会话的主入口：引导用户依次完成筛选、选择会话、"
                 "选定归档或永久删除，操作由用户在表单中直接确认。"
             ),
-            "inputSchema": {"type": "object", "properties": {
-                "managerContext": {"type": "string", "description": "内部上下文令牌。"},
-            }},
+            "inputSchema": {"type": "object", "properties": {}},
             "annotations": {"readOnlyHint": False, "destructiveHint": True},
         },
         {

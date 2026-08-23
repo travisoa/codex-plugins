@@ -22,8 +22,7 @@
     "category": "Productivity",
     "capabilities": [
       "MCP Apps UI",
-      "Codex app-server",
-      "CLI TUI"
+      "Codex app-server"
     ],
     "websiteURL": "https://github.com/travisoa/codex-plugins/tree/main/plugins/codex-session-cleaner",
     "composerIcon": "./assets/icon-v2.png",

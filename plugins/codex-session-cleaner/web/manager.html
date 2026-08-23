@@ -85,7 +85,7 @@
     <section id="toolbar" class="toolbar" aria-label="会话筛选">
       <input id="search" class="search" type="search" placeholder="搜索标题、ID、标签或项目路径…">
       <div class="segments" role="tablist">
-        <button data-scope="active">当前</button><button data-scope="archived">已归档</button><button data-scope="all" class="active">全部</button>
+        <button data-scope="active">未归档</button><button data-scope="archived">已归档</button><button data-scope="all" class="active">全部</button>
       </div>
       <select id="tagFilter" class="tag-select" aria-label="按类别标签筛选">
         <option value="">标签</option>
@@ -148,7 +148,7 @@
         zh: {
           htmlLang: 'zh-CN', dateLocale: 'zh-CN', title: 'Codex 会话清理器', languageSelector: '语言选择', switchChinese: '切换为中文', switchEnglish: '切换为英文',
           subtitle: '看清项目与文件线索，再归档或永久删除。', shield: '🔒 当前管理会话受保护', toolbar: '会话筛选',
-          search: '搜索标题、ID、标签或项目路径…', scopeActive: '当前', scopeArchived: '已归档', scopeAll: '全部',
+          search: '搜索标题、ID、标签或项目路径…', scopeActive: '未归档', scopeArchived: '已归档', scopeAll: '全部',
           tag: '标签', tagAria: '按类别标签筛选', date: '日期', dateAria: '按最后更新时间筛选',
           withinDay: '1 天内', withinWeek: '1 周内', withinMonth: '1 个月内', older3Months: '3 个月前（更早）',
           olderMonth: '1 个月前（更早）', olderWeek: '1 周前（更早）', custom: '自定义日期', refresh: '刷新',
@@ -175,7 +175,7 @@
         en: {
           htmlLang: 'en', dateLocale: 'en-US', title: 'Codex Session Cleaner', languageSelector: 'Language', switchChinese: 'Switch to Chinese', switchEnglish: 'Switch to English',
           subtitle: 'Review project and file clues, then archive or permanently delete.', shield: '🔒 Current manager session is protected', toolbar: 'Session filters',
-          search: 'Search title, ID, tag, or project path…', scopeActive: 'Current', scopeArchived: 'Archived', scopeAll: 'All',
+          search: 'Search title, ID, tag, or project path…', scopeActive: 'Not archived', scopeArchived: 'Archived', scopeAll: 'All',
           tag: 'Tag', tagAria: 'Filter by category tag', date: 'Date', dateAria: 'Filter by last updated date',
           withinDay: 'Within 1 day', withinWeek: 'Within 1 week', withinMonth: 'Within 1 month', older3Months: 'More than 3 months ago',
           olderMonth: 'More than 1 month ago', olderWeek: 'More than 1 week ago', custom: 'Custom range', refresh: 'Refresh',
@@ -502,8 +502,17 @@
       }
 
       async function refresh() {
+        // 没有上下文令牌时后端会把每一行都标成不可操作，所以这种应答一旦“过期”
+        // （等待期间令牌到了）就丢掉重来，否则会把本来能勾选的列表盖成全灰。
+        const contextAtStart = state.managerContext;
         state.loading = true; render();
-        try { applySessions(await tool('list_sessions', { scope: 'all', search: '' })); }
+        try {
+          let data = await tool('list_sessions', { scope: 'all', search: '' });
+          if (!contextAtStart && state.managerContext) {
+            data = await tool('list_sessions', { scope: 'all', search: '' });
+          }
+          applySessions(data);
+        }
         catch (error) { showToast(error.message); }
         finally { state.loading = false; render(); }
       }
@@ -569,7 +578,18 @@
       $('deleteForm').addEventListener('submit', performDelete);
 
       applyLocale(); render();
-      setTimeout(() => { if (!state.sessions.length) refresh(); }, 500);
+      // open_session_manager 的结果通常随通知送达，并带来上下文令牌；等它一会儿再兜底，
+      // 免得抢跑一次没有令牌、整页不可勾选的列表。
+      (() => {
+        let waited = 0;
+        const tick = () => {
+          if (state.sessions.length || state.managerContext) return;
+          waited += 500;
+          if (waited >= 3000) { refresh(); return; }
+          setTimeout(tick, 500);
+        };
+        setTimeout(tick, 500);
+      })();
     })();
   </script>
 </body>
