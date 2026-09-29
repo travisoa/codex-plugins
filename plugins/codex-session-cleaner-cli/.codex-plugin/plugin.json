@@ -26,8 +26,8 @@
       "CLI TUI"
     ],
     "websiteURL": "https://github.com/travisoa/codex-plugins/tree/main/plugins/codex-session-cleaner-cli",
-    "composerIcon": "./assets/icon-v2.png",
-    "logo": "./assets/icon-v2.png",
+    "composerIcon": "./assets/composer-icon-v3.png",
+    "logo": "./assets/icon-v3.png",
     "defaultPrompt": [
       "\u4ea4\u4e92\u5f0f\u6e05\u7406 Codex \u4f1a\u8bdd",
       "\u6253\u5f00 Codex \u4f1a\u8bdd\u9009\u62e9\u5668",

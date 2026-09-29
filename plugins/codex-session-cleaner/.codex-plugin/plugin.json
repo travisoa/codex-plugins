@@ -25,8 +25,8 @@
       "Codex app-server"
     ],
     "websiteURL": "https://github.com/travisoa/codex-plugins/tree/main/plugins/codex-session-cleaner",
-    "composerIcon": "./assets/icon-v2.png",
-    "logo": "./assets/icon-v2.png",
+    "composerIcon": "./assets/composer-icon-v3.png",
+    "logo": "./assets/icon-v3.png",
     "screenshots": [
       "./assets/screenshots/session-manager-overview.png"
     ],
