@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 SOURCE_KINDS = [
     "cli", "vscode", "exec", "appServer", "subAgent", "subAgentReview",
     "subAgentCompact", "subAgentThreadSpawn", "subAgentOther", "unknown",
@@ -65,6 +65,10 @@ class AppServerError(RuntimeError):
     pass
 
 
+class AppServerTimeout(AppServerError):
+    """A request was sent but its completion is not known."""
+
+
 class AppServerClient:
     """Small synchronous client for the line-delimited Codex app-server protocol."""
 
@@ -74,6 +78,7 @@ class AppServerClient:
         self._lock = threading.Lock()
         self._next_id = 1
         self._stderr: queue.Queue[str] = queue.Queue(maxsize=100)
+        self._stdout_buffer = b""
 
     @staticmethod
     def _find_codex() -> str:
@@ -111,13 +116,14 @@ class AppServerClient:
             text=True,
             bufsize=1,
         )
+        self._stdout_buffer = b""
         threading.Thread(target=self._drain_stderr, daemon=True).start()
         self.request(
             "initialize",
             {
                 "clientInfo": {
                     "name": "codex_session_cleaner",
-                    "title": "Codex Session Cleaner",
+                    "title": "Codex Session Manager",
                     "version": VERSION,
                 },
                 "capabilities": {
@@ -155,17 +161,29 @@ class AppServerClient:
                 if self.process.poll() is not None:
                     errors = "\n".join(list(self._stderr.queue)[-8:])
                     raise AppServerError(f"Codex app-server 已退出。{errors}")
-                ready, _, _ = select.select(
-                    [self.process.stdout], [], [], max(0.0, min(0.25, deadline - time.monotonic()))
+                end = self._stdout_buffer.find(b"\n")
+                if end < 0:
+                    # TextIOWrapper.readline() can retain another complete frame
+                    # after select has drained the pipe. Read raw bytes instead,
+                    # and consume buffered frames before waiting on the fd again.
+                    ready, _, _ = select.select(
+                        [self.process.stdout], [], [], max(0.0, min(0.25, deadline - time.monotonic()))
+                    )
+                    if not ready:
+                        continue
+                    chunk = os.read(self.process.stdout.fileno(), 65536)
+                    if not chunk:
+                        raise AppServerError("Codex app-server 输出已关闭。")
+                    self._stdout_buffer += chunk
+                    continue
+                line, self._stdout_buffer = (
+                    self._stdout_buffer[:end], self._stdout_buffer[end + 1:]
                 )
-                if not ready:
-                    continue
-                line = self.process.stdout.readline()
-                if not line:
-                    continue
                 try:
-                    response = json.loads(line)
-                except json.JSONDecodeError:
+                    response = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(response, dict):
                     continue
                 if response.get("id") != request_id:
                     continue
@@ -174,7 +192,7 @@ class AppServerClient:
                     detail = err.get("message", str(err)) if isinstance(err, dict) else str(err)
                     raise AppServerError(f"{method} 失败：{detail}")
                 return response.get("result")
-        raise AppServerError(f"等待 {method} 响应超时。")
+        raise AppServerTimeout(f"等待 {method} 响应超时。")
 
     def close(self) -> None:
         if self.process and self.process.poll() is None:
@@ -968,7 +986,7 @@ LIST_PAGE_LIMIT = 100
 LIST_MAX_PAGES = 50
 
 
-def _list_one(archived: bool) -> tuple[list[dict[str, Any]], bool]:
+def _list_one(archived: bool, operation_deadline: float | None = None) -> tuple[list[dict[str, Any]], bool]:
     """List every thread, plus whether the page cap cut the walk short.
 
     Searching happens locally so plugin-only fields stay matchable. The cap is
@@ -978,6 +996,8 @@ def _list_one(archived: bool) -> tuple[list[dict[str, Any]], bool]:
     output: list[dict[str, Any]] = []
     cursor: str | None = None
     for _ in range(LIST_MAX_PAGES):
+        if operation_deadline is not None and time.monotonic() >= operation_deadline:
+            raise AppServerError("会话列表读取超过本批操作时限，尚未执行归档或删除。")
         params: dict[str, Any] = {
             "archived": archived,
             "cursor": cursor,
@@ -1007,6 +1027,7 @@ def list_sessions(
     now: datetime | None = None,
     *,
     history_threads: list[dict[str, Any]] | None = None,
+    operation_deadline: float | None = None,
 ) -> dict[str, Any]:
     date_start, date_end = _date_filter_bounds(
         date_preset, custom_start, custom_end, now
@@ -1014,11 +1035,11 @@ def list_sessions(
     raw: list[tuple[dict[str, Any], bool]] = []
     truncated = False
     if scope in ("active", "all"):
-        page, cut_short = _list_one(False)
+        page, cut_short = _list_one(False, operation_deadline)
         raw.extend((item, False) for item in page)
         truncated = truncated or cut_short
     if scope in ("archived", "all"):
-        page, cut_short = _list_one(True)
+        page, cut_short = _list_one(True, operation_deadline)
         raw.extend((item, True) for item in page)
         truncated = truncated or cut_short
     if history_threads is None:
@@ -1245,19 +1266,34 @@ def _validate_ids(value: Any) -> list[str]:
     return ids
 
 
+BATCH_OPERATION_TIMEOUT_SECONDS = 10 * 60
+
+
+def _not_started_results(ids: list[str], error: str) -> list[dict[str, Any]]:
+    return [
+        {"threadId": thread_id, "ok": False, "error": error, "notStarted": True}
+        for thread_id in ids
+    ]
+
+
 def archive_sessions(ids: list[str], current_id: str | None) -> dict[str, Any]:
     if not current_id:
         raise ValueError(f"缺少当前任务上下文；为避免误操作，请重新打开 {SURFACE_LABEL}。")
+    deadline = time.monotonic() + BATCH_OPERATION_TIMEOUT_SECONDS
     # 复用删除路径的可管理性判断：必须是列表中的顶层会话，且不是当前会话或临时会话。
     by_id = {
         item["id"]: item
         for item in list_sessions(
-            current_id, "all", "", history_threads=_history_threads()
+            current_id, "all", "", history_threads=_history_threads(), operation_deadline=deadline
         )["sessions"]
     }
     results = []
     archived_ids: list[str] = []
-    for thread_id in ids:
+    requires_reopen = False
+    for index, thread_id in enumerate(ids):
+        if time.monotonic() >= deadline:
+            results.extend(_not_started_results(ids[index:], "本批归档已达到 10 分钟时限，此项尚未执行。"))
+            break
         item = by_id.get(thread_id)
         if thread_id == current_id:
             results.append({"threadId": thread_id, "ok": False, "error": "当前管理会话受保护。"})
@@ -1275,20 +1311,27 @@ def archive_sessions(ids: list[str], current_id: str | None) -> dict[str, Any]:
             archived_ids.append(thread_id)
             results.append({"threadId": thread_id, "ok": True})
         except Exception as exc:
-            results.append(
-                {"threadId": thread_id, "ok": False, "error": _friendly_thread_error(exc)}
-            )
+            failure = {"threadId": thread_id, "ok": False, "error": _friendly_thread_error(exc)}
+            if isinstance(exc, (AppServerTimeout, TimeoutError)):
+                failure["outcomeUnknown"] = True
+                failure["error"] += " 此项结果尚未确认；已停止后续操作，请重新打开管理页核对。"
+                requires_reopen = True
+            results.append(failure)
+            if requires_reopen:
+                results.extend(_not_started_results(ids[index + 1:], "前一项响应超时，此项尚未执行，请重新打开管理页核对。"))
+                break
     # 归档只改状态、不删数据，因此只广播通知，不动桌面目录里的条目。
     cwd_by_id = {
         thread_id: str((by_id.get(thread_id) or {}).get("cwd") or "")
         for thread_id in archived_ids
     }
     notification = _notify_desktop_sidebar(archived_ids, cwd_by_id)
-    if archived_ids:
+    if archived_ids or requires_reopen:
         _forget_history_threads()  # 归档会搬走 rollout 文件，缓存的扫描结果就过期了
     return {
         "operation": "archive",
         "results": results,
+        "requiresReopen": requires_reopen,
         "sidebarSync": {
             "ok": not notification.get("error"),
             "notification": notification,
@@ -1350,8 +1393,11 @@ def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -
         raise ValueError(f"缺少当前会话元数据；为避免误删，已拒绝操作。请从 {SURFACE_LABEL} 执行。")
     if current_id in ids:
         raise ValueError("选中项包含当前管理会话，已拒绝整批删除。")
+    deadline = time.monotonic() + BATCH_OPERATION_TIMEOUT_SECONDS
     history_threads = _history_threads()
-    sessions = list_sessions(current_id, "all", "", history_threads=history_threads)["sessions"]
+    sessions = list_sessions(
+        current_id, "all", "", history_threads=history_threads, operation_deadline=deadline
+    )["sessions"]
     by_id = {item["id"]: item for item in sessions}
     unavailable = [thread_id for thread_id in ids if thread_id not in by_id]
     unsafe = [thread_id for thread_id in ids if thread_id in by_id and not by_id[thread_id]["deletable"]]
@@ -1373,7 +1419,11 @@ def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -
     deleted_ids: list[str] = []
     deleted: set[str] = set()
     operation_order = _delete_order(ids, history_threads)
-    for thread_id in operation_order:
+    requires_reopen = False
+    for index, thread_id in enumerate(operation_order):
+        if time.monotonic() >= deadline:
+            results.extend(_not_started_results(operation_order[index:], "本批删除已达到 10 分钟时限，此项尚未执行。"))
+            break
         blocking = unselected_blockers[thread_id]
         reason = "仍被分叉历史引用，请先选择并删除阻塞分叉："
         if not blocking:
@@ -1396,22 +1446,31 @@ def delete_sessions(ids: list[str], confirmation: str, current_id: str | None) -
             deleted.add(thread_id)
             results.append({"threadId": thread_id, "ok": True})
         except Exception as exc:
-            results.append(
-                {"threadId": thread_id, "ok": False, "error": _friendly_thread_error(exc)}
-            )
+            failure = {"threadId": thread_id, "ok": False, "error": _friendly_thread_error(exc)}
+            if isinstance(exc, (AppServerTimeout, TimeoutError)):
+                failure["outcomeUnknown"] = True
+                failure["error"] += " 此项结果尚未确认；已停止后续操作，请重新打开管理页核对。"
+                requires_reopen = True
+            results.append(failure)
+            if requires_reopen:
+                results.extend(_not_started_results(operation_order[index + 1:], "前一项响应超时，此项尚未执行，请重新打开管理页核对。"))
+                break
     cwd_by_id = {thread_id: str(by_id[thread_id].get("cwd") or "") for thread_id in deleted_ids}
-    if deleted_ids:
+    if deleted_ids or requires_reopen:
         _forget_history_threads()  # 删除会移除 rollout 文件，缓存的扫描结果就过期了
     sidebar_sync = sync_desktop_sidebar(deleted_ids, cwd_by_id)
     return {
         "operation": "delete",
         "operationOrder": operation_order,
         "results": results,
+        "requiresReopen": requires_reopen,
         "sidebarSync": sidebar_sync,
     }
 
 
-BATCH_LIMIT = 100
+# A complete list can contain both active and archived pages. Accept a full
+# selection as one operation so history referrers can still be ordered globally.
+BATCH_LIMIT = LIST_MAX_PAGES * LIST_PAGE_LIMIT * 2
 def _record_host(params: Any) -> None:
     if not isinstance(params, dict):
         return

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Terminal UI for the Codex session cleaner.
+"""Terminal UI for Codex Session Manager.
 
 Reuses server.py for every listing, archive and delete rule so the CLI and the
 MCP Apps manager page cannot drift apart on safety behaviour. Standard library
@@ -52,7 +52,7 @@ def load_server() -> Any:
 
 TEXT = {
     "zh": {
-        "title": "Codex 会话清理器",
+        "title": "Codex会话管理",
         "cliContext": "CLI 模式 · 未绑定当前会话",
         "boundContext": lambda value: f"当前会话 {value[:8]}",
         "loading": "正在读取会话…",
@@ -107,7 +107,7 @@ TEXT = {
         "loadFailed": lambda error: f"读取会话失败：{error}",
     },
     "en": {
-        "title": "Codex Session Cleaner",
+        "title": "Codex Session Manager",
         "cliContext": "CLI mode · no current session bound",
         "boundContext": lambda value: f"Current session {value[:8]}",
         "loading": "Loading sessions…",
@@ -739,7 +739,7 @@ def build_state(args: argparse.Namespace) -> TuiState:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Codex 会话清理器终端界面")
+    parser = argparse.ArgumentParser(description="Codex会话管理终端界面")
     parser.add_argument("--lang", choices=("zh", "en"), help="界面语言，默认跟随环境变量")
     parser.add_argument(
         "--current",
@@ -753,7 +753,7 @@ def main(argv: list[str] | None = None) -> int:
 
     server = load_server()
     # 共享文案默认指向管理页；终端界面既不是管理页也不是选择器，如实说自己。
-    server.SURFACE_LABEL = "Codex 会话清理器终端界面"
+    server.SURFACE_LABEL = "Codex会话管理终端界面"
     state = build_state(args)
     try:
         curses.wrapper(lambda screen: SessionTui(screen, server, state).run())

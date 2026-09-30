@@ -6,8 +6,8 @@
 
 | 插件 | 说明 | 文档 |
 | --- | --- | --- |
-| `codex-session-cleaner` | **桌面客户端版**：可视化管理页，查看会话项目和文件线索，批量归档或安全删除 | [使用说明](plugins/codex-session-cleaner/README.md) |
-| `codex-session-cleaner-cli` | **命令行版**：Codex CLI 中通过交互表单筛选、勾选并归档或删除，另附终端界面 | [使用说明](plugins/codex-session-cleaner-cli/README.md) |
+| `codex-session-cleaner` | **Codex会话管理**：桌面客户端可视化管理页，查看会话项目和文件线索，批量归档或安全删除 | [使用说明](plugins/codex-session-cleaner/README.md) |
+| `codex-session-cleaner-cli` | **Codex会话管理 · 命令行版**：Codex CLI 中通过交互表单筛选、勾选并归档或删除，另附终端界面 | [使用说明](plugins/codex-session-cleaner-cli/README.md) |
 
 ## 安装
 

@@ -760,7 +760,7 @@ class SessionCleanerTests(unittest.TestCase):
         response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {"uri": server.RESOURCE_URI}})
         content = response["result"]["contents"][0]
         self.assertEqual(content["mimeType"], "text/html;profile=mcp-app")
-        self.assertIn("Codex 会话清理器", content["text"])
+        self.assertIn("Codex会话管理", content["text"])
         self.assertIn("tools/call", content["text"])
 
     def test_ui_has_selection_based_clipboard_fallback(self):
@@ -802,7 +802,7 @@ class SessionCleanerTests(unittest.TestCase):
         self.assertIn("state.localeMode === 'manual'", html)
         self.assertIn("setLocale(button.dataset.locale, 'manual')", html)
         self.assertIn("ui/notifications/host-context-changed", html)
-        self.assertIn("Codex Session Cleaner", html)
+        self.assertIn("Codex Session Manager", html)
         self.assertIn("confirmation: '删除'", html)
         self.assertIn("confirmation: 'delete'", html)
         self.assertIn("confirmation: t().confirmation", html)
@@ -1175,7 +1175,7 @@ class ManagerBootstrapTests(unittest.TestCase):
         self.assertIn("const contextAtStart = state.managerContext;", html)
         self.assertIn("if (!contextAtStart && state.managerContext) {", html)
         # 判断必须发生在把数据写进 state 之前，否则灰列表已经盖上去了。
-        refresh = html[html.index("async function refresh()"):]
+        refresh = html[html.index("async function refreshSessions()"):]
         refresh = refresh[: refresh.index("async function archiveSelected")]
         self.assertLess(
             refresh.index("if (!contextAtStart && state.managerContext)"),
@@ -1223,7 +1223,7 @@ class ListReuseTests(unittest.TestCase):
         """勾选若走重建，连续勾选会作用在已被替换掉的节点上，选择就丢了。"""
         html = self.html()
         self.assertIn("checkbox.checked = state.selected.has(session.id);", html)
-        self.assertIn("checkbox.disabled = !session.deletable || state.loading;", html)
+        self.assertIn("checkbox.disabled = !session.deletable || state.loading || state.operationUncertain;", html)
         signature = html[html.index("const signature = JSON.stringify("):]
         signature = signature[: signature.index("\n")]
         # 签名只认会话数据、文件线索和语言；勾选与 loading 不进签名，否则每次都重建。

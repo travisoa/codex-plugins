@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:,">
-  <title>Codex 会话清理器</title>
+  <title>Codex会话管理</title>
   <style>
     :root { color-scheme: light dark; --bg:#f4f5f7; --panel:rgba(255,255,255,.88); --text:#17191d; --muted:#6e737b; --line:rgba(23,25,29,.11); --accent:#1677ff; --danger:#d92d20; --danger-bg:#fff0ee; --shadow:0 14px 36px rgba(24,30,42,.10); }
     @media (prefers-color-scheme:dark) { :root { --bg:#17181a; --panel:rgba(34,35,38,.9); --text:#f5f6f7; --muted:#a7abb1; --line:rgba(255,255,255,.12); --danger-bg:#421c1a; --shadow:0 14px 36px rgba(0,0,0,.28); } }
@@ -35,15 +35,15 @@
     .btn:hover:not(:disabled) { border-color:rgba(22,119,255,.5); }
     .btn:disabled { opacity:.42; cursor:not-allowed; }
     .btn.danger { color:var(--danger); border-color:rgba(217,45,32,.3); background:var(--danger-bg); }
-    .summary { grid-column:1 / -1; display:flex; align-items:center; justify-content:space-between; gap:10px; margin:0; padding-top:6px; border-top:1px solid var(--line); white-space:nowrap; }
-    .actions { display:flex; gap:6px; align-items:center; }
-    .list { display:grid; gap:10px; }
+    .summary { grid-column:1 / -1; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; margin:0; padding-top:6px; border-top:1px solid var(--line); }
+    .actions { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+    .list { display:grid; align-content:start; gap:10px; max-height:480px; overflow-y:auto; overscroll-behavior:contain; scrollbar-gutter:stable; padding:2px; }
     .card { display:grid; grid-template-columns:auto minmax(0,1fr) auto; gap:12px; align-items:flex-start; padding:15px; border:1px solid var(--line); border-radius:15px; background:var(--panel); box-shadow:0 5px 18px rgba(20,25,34,.04); }
     .card:hover { border-color:rgba(22,119,255,.28); }
     .card.current { box-shadow:inset 3px 0 0 var(--accent); }
     .card input[type=checkbox] { width:17px; height:17px; margin-top:3px; accent-color:var(--accent); }
     .title-row { display:flex; align-items:center; gap:7px; min-width:0; }
-    .title { font-size:15px; font-weight:650; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .title { min-width:0; font-size:15px; font-weight:650; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .badge { display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:999px; padding:1px 7px; font-size:11px; color:var(--muted); white-space:nowrap; }
     .badge.current { color:var(--accent); border-color:rgba(22,119,255,.35); }
     .badge.warning { color:#b54708; border-color:rgba(181,71,8,.35); background:rgba(255,171,64,.10); }
@@ -59,21 +59,23 @@
     .notice { margin-top:13px; padding:10px 12px; color:var(--muted); border:1px solid var(--line); border-radius:11px; }
     .toast { position:fixed; right:18px; bottom:18px; max-width:400px; z-index:20; padding:11px 14px; border-radius:11px; background:var(--text); color:var(--bg); box-shadow:var(--shadow); opacity:0; transform:translateY(10px); pointer-events:none; transition:.18s ease; }
     .toast.show { opacity:1; transform:translateY(0); }
-    dialog { width:min(520px,calc(100vw - 28px)); border:1px solid var(--line); border-radius:18px; padding:0; color:var(--text); background:var(--panel); box-shadow:0 26px 90px rgba(0,0,0,.35); }
+    dialog { position:fixed; top:0; bottom:auto; margin:14px auto 0; width:min(520px,calc(100vw - 28px)); max-height:calc(100dvh - 28px); overflow:auto; border:1px solid var(--line); border-radius:18px; padding:0; color:var(--text); background:var(--panel); box-shadow:0 26px 90px rgba(0,0,0,.35); }
     dialog::backdrop { background:rgba(0,0,0,.46); backdrop-filter:blur(3px); }
     .modal { padding:20px; }
     .modal h2 { margin:0 0 6px; font-size:19px; }
     .danger-box { margin:14px 0; border:1px solid rgba(217,45,32,.28); background:var(--danger-bg); border-radius:11px; padding:10px 12px; color:var(--danger); }
+    .delete-targets { max-height:96px; overflow-y:auto; margin:12px 0; padding-left:22px; overflow-wrap:anywhere; }
     .confirm { width:100%; color:var(--text); background:transparent; border:1px solid var(--line); border-radius:10px; padding:10px; }
+    .confirm:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
     .modal-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:16px; }
-    @media (max-width:960px) { .toolbar { grid-template-columns:minmax(160px,1fr) auto 112px 124px auto; } }
-    @media (max-width:720px) { .app { padding-top:14px; } .toolbar { grid-template-columns:1fr; position:static; } header { align-items:flex-start; flex-direction:column; } .summary { align-items:flex-start; flex-direction:column; } .card { grid-template-columns:auto minmax(0,1fr); } .side { grid-column:2; align-items:flex-start; flex-direction:row; } .files { grid-column:2; } }
+    @media (max-width:960px) { .toolbar { grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto; } .search,.segments { grid-column:1 / -1; } .segments { width:max-content; } }
+    @media (max-width:720px) { .app { padding-top:14px; } .toolbar { grid-template-columns:1fr; position:static; } header { align-items:flex-start; flex-direction:column; } .header-actions,.custom-dates { flex-wrap:wrap; justify-content:flex-start; } .shield { white-space:normal; } .date-input { min-width:0; } .summary { align-items:flex-start; flex-direction:column; } .list { max-height:360px; } .card { grid-template-columns:auto minmax(0,1fr); } .title-row { flex-wrap:wrap; } .title { flex-basis:100%; } .side { grid-column:2; align-items:flex-start; flex-direction:row; flex-wrap:wrap; } .files { grid-column:2; } }
   </style>
 </head>
 <body>
   <main class="app">
     <header>
-      <div><h1 id="pageTitle">Codex 会话清理器</h1><div id="pageSubtitle" class="subtitle">看清项目与文件线索，再归档或永久删除。</div></div>
+      <div><h1 id="pageTitle">Codex会话管理</h1><div id="pageSubtitle" class="subtitle">看清项目与文件线索，再归档或永久删除。</div></div>
       <div class="header-actions">
         <div id="shield" class="shield">🔒 当前管理会话受保护</div>
         <div id="languageSwitch" class="language-switch" role="group" aria-label="语言选择">
@@ -110,6 +112,7 @@
       <div class="summary">
         <div><span id="count">正在读取…</span> <span id="selection" class="muted"></span></div>
         <div class="actions">
+          <button id="selectAll" class="btn" disabled>全选</button>
           <button id="archive" class="btn" disabled>归档所选</button>
           <button id="delete" class="btn danger" disabled>永久删除所选</button>
         </div>
@@ -123,6 +126,7 @@
     <form method="dialog" class="modal" id="deleteForm">
       <h2 id="deleteHeading">永久删除所选会话？</h2>
       <div id="deleteDescription" class="muted">Codex 会一并删除这些会话的派生会话和持久化元数据。此操作不可撤销。</div>
+      <ul id="deleteTargets" class="delete-targets"></ul>
       <div id="deleteDanger" class="danger-box">项目文件不会被删除，但会话内容将无法从 Codex 恢复。</div>
       <label id="confirmationLabel" for="confirmation"></label>
       <input id="confirmation" class="confirm" autocomplete="off" placeholder="删除">
@@ -146,16 +150,16 @@
     (() => {
       const I18N = {
         zh: {
-          htmlLang: 'zh-CN', dateLocale: 'zh-CN', title: 'Codex 会话清理器', languageSelector: '语言选择', switchChinese: '切换为中文', switchEnglish: '切换为英文',
+          htmlLang: 'zh-CN', dateLocale: 'zh-CN', title: 'Codex会话管理', languageSelector: '语言选择', switchChinese: '切换为中文', switchEnglish: '切换为英文',
           subtitle: '看清项目与文件线索，再归档或永久删除。', shield: '🔒 当前管理会话受保护', toolbar: '会话筛选',
           search: '搜索标题、ID、标签或项目路径…', scopeActive: '未归档', scopeArchived: '已归档', scopeAll: '全部',
           tag: '标签', tagAria: '按类别标签筛选', date: '日期', dateAria: '按最后更新时间筛选',
           withinDay: '1 天内', withinWeek: '1 周内', withinMonth: '1 个月内', older3Months: '3 个月前（更早）',
           olderMonth: '1 个月前（更早）', olderWeek: '1 周前（更早）', custom: '自定义日期', refresh: '刷新',
           lastUpdated: '最后更新时间', to: '至', startDate: '开始日期', endDate: '结束日期',
-          archiveSelected: '归档所选', deleteSelected: '永久删除所选',
+          selectAll: '全选', deselectAll: '取消全选', selectAllHint: '选择当前筛选结果中的所有可操作会话', archiveSelected: '归档所选', deleteSelected: '永久删除所选',
           notice: '删除会话不会删除项目文件。文件列表只是从会话记录提取的修改/引用线索；共享插件缓存、模型缓存、认证信息和全局配置不在本插件清理范围内。',
-          requestTimeout: '请求超时', toolFailed: '工具调用失败', requestFailed: '请求失败', unknownTime: '时间未知',
+          requestTimeout: '请求超时', operationTimeout: '操作仍可能在进行，请重新打开管理页核对结果后再操作', refreshFailed: '列表刷新失败，请稍后刷新核对', toolFailed: '工具调用失败', requestFailed: '请求失败', unknownTime: '时间未知',
           sessions: count => `${count} 个会话`, selected: count => `· 已选 ${count}`, loading: '正在读取会话…', empty: '没有符合条件的会话',
           protected: '当前管理会话受保护', ephemeralProtected: '临时会话不可删除', selectSession: '选择会话',
           busy: '使用中', busyHint: '该会话正被 Codex 打开，只能在侧边栏归档或删除',
@@ -165,24 +169,24 @@
           fileNote: '文件线索来自会话记录，可能不完整。', changedFiles: '修改文件', referencedFiles: '命令引用文件', noFiles: '未从会话记录中发现', copyPath: '复制路径',
           copied: '已复制', copyFailed: '无法访问剪贴板，请手动复制', unknownError: '未知错误',
           copySessionId: '复制会话 ID', manualCopyTitle: '请手动复制', manualCopyHint: '内容已选中，按 ⌘C 或 Ctrl+C 复制。', close: '关闭',
-          archiveFailed: (count, error) => `${count} 个会话归档失败：${error}`, archivedSuccess: '所选会话已归档',
+          archiveFailed: (count, error) => `${count} 个会话归档失败：${error}`, archivedSuccess: '所选会话已归档', archiveSyncFailed: '会话已归档；侧边栏同步失败，请刷新或重启 Codex',
           deleteHeading: count => `永久删除 ${count} 个会话？`, deleteDescription: 'Codex 会一并删除这些会话的派生会话和持久化元数据。此操作不可撤销。',
           deleteDanger: '项目文件不会被删除，但会话内容将无法从 Codex 恢复。', confirmationBefore: '输入 ', confirmationAfter: ' 继续', confirmation: '删除',
-          cancel: '取消', confirmDelete: '确认永久删除', deleteFailed: (count, error) => `${count} 个会话删除失败：${error}`,
+          cancel: '取消', confirmDelete: '确认永久删除', selectionChanged: '所选会话状态已变化，请重新核对后再删除', deleteFailed: (count, error) => `${count} 个会话删除失败：${error}`,
           sidebarSyncFailed: '会话已删除；侧边栏同步失败，请刷新或重启 Codex', deletedSuccess: '所选会话已永久删除，侧边栏已同步',
           tagLabels: { 'hidden-fork':'隐藏分叉', 'session-management':'会话管理', automation:'自动化', 'plugin-development':'插件开发', lark:'飞书协作', documents:'文档表格', media:'图像视频', development:'代码开发', general:'常规任务' }
         },
         en: {
-          htmlLang: 'en', dateLocale: 'en-US', title: 'Codex Session Cleaner', languageSelector: 'Language', switchChinese: 'Switch to Chinese', switchEnglish: 'Switch to English',
+          htmlLang: 'en', dateLocale: 'en-US', title: 'Codex Session Manager', languageSelector: 'Language', switchChinese: 'Switch to Chinese', switchEnglish: 'Switch to English',
           subtitle: 'Review project and file clues, then archive or permanently delete.', shield: '🔒 Current manager session is protected', toolbar: 'Session filters',
           search: 'Search title, ID, tag, or project path…', scopeActive: 'Not archived', scopeArchived: 'Archived', scopeAll: 'All',
           tag: 'Tag', tagAria: 'Filter by category tag', date: 'Date', dateAria: 'Filter by last updated date',
           withinDay: 'Within 1 day', withinWeek: 'Within 1 week', withinMonth: 'Within 1 month', older3Months: 'More than 3 months ago',
           olderMonth: 'More than 1 month ago', olderWeek: 'More than 1 week ago', custom: 'Custom range', refresh: 'Refresh',
           lastUpdated: 'Last updated', to: 'to', startDate: 'Start date', endDate: 'End date',
-          archiveSelected: 'Archive selected', deleteSelected: 'Permanently delete selected',
+          selectAll: 'Select all', deselectAll: 'Deselect all', selectAllHint: 'Select all available sessions in the current filtered results', archiveSelected: 'Archive selected', deleteSelected: 'Permanently delete selected',
           notice: 'Deleting sessions does not delete project files. The file list only contains change and reference clues extracted from session records; shared plugin caches, model caches, credentials, and global settings are outside this plugin’s scope.',
-          requestTimeout: 'Request timed out', toolFailed: 'Tool call failed', requestFailed: 'Request failed', unknownTime: 'Unknown time',
+          requestTimeout: 'Request timed out', operationTimeout: 'The operation may still be running. Reopen the manager and check the results before taking further action.', refreshFailed: 'The list could not be refreshed. Refresh later to check the results.', toolFailed: 'Tool call failed', requestFailed: 'Request failed', unknownTime: 'Unknown time',
           sessions: count => `${count} session${count === 1 ? '' : 's'}`, selected: count => `· ${count} selected`, loading: 'Loading sessions…', empty: 'No matching sessions',
           protected: 'Current manager session is protected', ephemeralProtected: 'Temporary sessions cannot be deleted', selectSession: 'Select session',
           busy: 'In use', busyHint: 'This session is open in Codex; archive or delete it from the sidebar',
@@ -192,16 +196,16 @@
           fileNote: 'File clues are extracted from session records and may be incomplete.', changedFiles: 'Changed files', referencedFiles: 'Files referenced by commands', noFiles: 'None found in session records', copyPath: 'Copy path',
           copied: 'Copied', copyFailed: 'Clipboard unavailable; copy manually', unknownError: 'Unknown error',
           copySessionId: 'Copy session ID', manualCopyTitle: 'Copy manually', manualCopyHint: 'The text is selected — press ⌘C or Ctrl+C.', close: 'Close',
-          archiveFailed: (count, error) => `${count} session${count === 1 ? '' : 's'} failed to archive: ${error}`, archivedSuccess: 'Selected sessions archived',
+          archiveFailed: (count, error) => `${count} session${count === 1 ? '' : 's'} failed to archive: ${error}`, archivedSuccess: 'Selected sessions archived', archiveSyncFailed: 'Sessions archived, but sidebar sync failed. Refresh or restart Codex.',
           deleteHeading: count => `Permanently delete ${count} session${count === 1 ? '' : 's'}?`, deleteDescription: 'Codex will also delete derived sessions and persisted metadata. This action cannot be undone.',
           deleteDanger: 'Project files will not be deleted, but the session content cannot be recovered in Codex.', confirmationBefore: 'Type ', confirmationAfter: ' to continue', confirmation: 'delete',
-          cancel: 'Cancel', confirmDelete: 'Confirm permanent deletion', deleteFailed: (count, error) => `${count} session${count === 1 ? '' : 's'} failed to delete: ${error}`,
+          cancel: 'Cancel', confirmDelete: 'Confirm permanent deletion', selectionChanged: 'The selected sessions have changed. Review them again before deleting.', deleteFailed: (count, error) => `${count} session${count === 1 ? '' : 's'} failed to delete: ${error}`,
           sidebarSyncFailed: 'Sessions deleted, but sidebar sync failed. Refresh or restart Codex.', deletedSuccess: 'Selected sessions permanently deleted and sidebar synced',
           tagLabels: { 'hidden-fork':'Hidden fork', 'session-management':'Session management', automation:'Automation', 'plugin-development':'Plugin development', lark:'Lark collaboration', documents:'Documents & sheets', media:'Images & video', development:'Code development', general:'General' }
         }
       };
       const localeFrom = value => String(value || '').toLowerCase().startsWith('zh') ? 'zh' : 'en';
-      const state = { sessions: [], selected: new Set(), scope: 'all', search: '', tag: '', datePreset: 'all', customStart: '', customEnd: '', managerContext: '', files: new Map(), availableTags: [], loading: false, locale: localeFrom(navigator.language), localeMode: 'auto' };
+      const state = { sessions: [], selected: new Set(), scope: 'all', search: '', tag: '', datePreset: 'all', customStart: '', customEnd: '', managerContext: '', files: new Map(), availableTags: [], loading: false, operationUncertain: false, deleteTargets: [], locale: localeFrom(navigator.language), localeMode: 'auto' };
       const pending = new Map();
       let rpcId = 1;
       const $ = id => document.getElementById(id);
@@ -237,27 +241,33 @@
         for (const option of $('datePreset').options) option.textContent = dateLabels[option.value];
         $('refresh').textContent = copy.refresh; $('customDates').children[0].textContent = copy.lastUpdated; $('customDates').children[2].textContent = copy.to;
         $('customStart').setAttribute('aria-label', copy.startDate); $('customEnd').setAttribute('aria-label', copy.endDate);
-        $('archive').textContent = copy.archiveSelected; $('delete').textContent = copy.deleteSelected; $('notice').textContent = copy.notice;
+        $('archive').textContent = copy.archiveSelected; $('delete').textContent = copy.deleteSelected; $('notice').textContent = state.operationUncertain ? copy.operationTimeout : copy.notice;
         $('deleteDescription').textContent = copy.deleteDescription; $('deleteDanger').textContent = copy.deleteDanger;
         const strong = document.createElement('strong'); strong.textContent = copy.confirmation;
         $('confirmationLabel').replaceChildren(document.createTextNode(copy.confirmationBefore), strong, document.createTextNode(copy.confirmationAfter));
         $('confirmation').placeholder = copy.confirmation; $('cancelDelete').textContent = copy.cancel; $('confirmDelete').textContent = copy.confirmDelete;
-        $('deleteHeading').textContent = copy.deleteHeading(visibleSelection().length);
+        $('deleteHeading').textContent = copy.deleteHeading(state.deleteTargets.length);
         updateTagOptions(state.availableTags);
       }
 
-      function request(method, params = {}) {
+      function request(method, params = {}, timeoutMs = 45000) {
         const id = rpcId++;
-        window.parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*');
         return new Promise((resolve, reject) => {
-          pending.set(id, { resolve, reject });
-          setTimeout(() => { if (pending.has(id)) { pending.delete(id); reject(new Error(t().requestTimeout)); } }, 45000);
+          const timer = setTimeout(() => {
+            if (pending.has(id)) {
+              pending.delete(id);
+              const error = new Error(t().requestTimeout); error.timedOut = true; reject(error);
+            }
+          }, timeoutMs);
+          pending.set(id, { resolve, reject, timer });
+          window.parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*');
         });
       }
 
       async function tool(name, args = {}) {
         const argumentsWithContext = state.managerContext ? { ...args, managerContext: state.managerContext } : args;
-        const result = await request('tools/call', { name, arguments: argumentsWithContext });
+        const mutation = name === 'archive_sessions' || name === 'delete_sessions';
+        const result = await request('tools/call', { name, arguments: argumentsWithContext }, mutation ? 15 * 60 * 1000 : 45000);
         if (result?.isError) throw new Error(result.content?.[0]?.text || t().toolFailed);
         return result?.structuredContent || result;
       }
@@ -268,7 +278,7 @@
         const message = event.data;
         if (!message || message.jsonrpc !== '2.0') return;
         if (message.id && pending.has(message.id) && ('result' in message || 'error' in message)) {
-          const job = pending.get(message.id); pending.delete(message.id);
+          const job = pending.get(message.id); pending.delete(message.id); clearTimeout(job.timer);
           message.error ? job.reject(new Error(message.error.message || t().requestFailed)) : job.resolve(message.result);
           return;
         }
@@ -368,6 +378,9 @@
         state.availableTags = Array.isArray(data.availableTags) ? data.availableTags : [];
         applyLocale();
         for (const id of [...state.selected]) if (!state.sessions.some(s => s.id === id && s.deletable)) state.selected.delete(id);
+        if ($('deleteDialog').open && state.deleteTargets.some(id => !visibleSelection().includes(id))) {
+          $('deleteDialog').close(); showToast(t().selectionChanged);
+        }
         render();
       }
 
@@ -403,7 +416,8 @@
       function buildCard(session) {
         const card = el('article', `card${session.current ? ' current' : ''}`);
         const checkbox = document.createElement('input'); checkbox.type = 'checkbox';
-        checkbox.checked = state.selected.has(session.id); checkbox.disabled = !session.deletable || state.loading;
+        checkbox.checked = state.selected.has(session.id); checkbox.disabled = !session.deletable || state.loading || state.operationUncertain;
+        checkbox.setAttribute('aria-label', `${t().selectSession}: ${session.title || session.id}`);
         checkbox.title = session.busy ? t().busyHint : session.current || session.protected ? t().protected : session.ephemeral ? t().ephemeralProtected : t().selectSession;
         checkbox.addEventListener('change', () => { checkbox.checked ? state.selected.add(session.id) : state.selected.delete(session.id); render(); });
         card.append(checkbox);
@@ -479,7 +493,7 @@
           // 勾选与禁用每次都可能变，单独同步，不必为它们重建整张卡片。
           const checkbox = card.querySelector('input[type=checkbox]');
           checkbox.checked = state.selected.has(session.id);
-          checkbox.disabled = !session.deletable || state.loading;
+          checkbox.disabled = !session.deletable || state.loading || state.operationUncertain;
           if (card === cursor) cursor = cursor.nextSibling;
           else list.insertBefore(card, cursor);
         }
@@ -489,10 +503,17 @@
       function render() {
         const sessions = filteredSessions();
         const selection = visibleSelection(sessions);
+        const available = sessions.filter(session => session.deletable);
+        const blocked = state.loading || state.operationUncertain;
         $('count').textContent = t().sessions(sessions.length);
         $('selection').textContent = selection.length ? t().selected(selection.length) : '';
-        $('archive').disabled = !selection.length || state.loading;
-        $('delete').disabled = !selection.length || state.loading;
+        $('selectAll').textContent = available.length && selection.length === available.length ? t().deselectAll : t().selectAll;
+        $('selectAll').title = t().selectAllHint;
+        $('selectAll').disabled = !available.length || blocked;
+        $('archive').disabled = !selection.length || blocked;
+        $('delete').disabled = !selection.length || blocked;
+        for (const id of ['refresh', 'search', 'tagFilter', 'datePreset', 'customStart', 'customEnd']) $(id).disabled = blocked;
+        document.querySelectorAll('[data-scope], [data-locale]').forEach(button => { button.disabled = blocked; });
         renderList(sessions);
       }
 
@@ -544,56 +565,97 @@
         showManualCopy(text);
       }
 
-      async function refresh() {
+      async function refreshSessions() {
         // 没有上下文令牌时后端会把每一行都标成不可操作，所以这种应答一旦“过期”
         // （等待期间令牌到了）就丢掉重来，否则会把本来能勾选的列表盖成全灰。
         const contextAtStart = state.managerContext;
+        let data = await tool('list_sessions', { scope: 'all', search: '' });
+        if (!contextAtStart && state.managerContext) {
+          data = await tool('list_sessions', { scope: 'all', search: '' });
+        }
+        applySessions(data);
+      }
+
+      async function refresh() {
+        if (state.loading || state.operationUncertain) return;
         state.loading = true; render();
         try {
-          let data = await tool('list_sessions', { scope: 'all', search: '' });
-          if (!contextAtStart && state.managerContext) {
-            data = await tool('list_sessions', { scope: 'all', search: '' });
-          }
-          applySessions(data);
+          await refreshSessions();
         }
         catch (error) { showToast(error.message); }
         finally { state.loading = false; render(); }
       }
 
       async function archiveSelected() {
+        if (state.loading || state.operationUncertain) return;
         const targets = visibleSelection();
         if (!targets.length) return;
         state.loading = true; render();
         try {
           const data = await tool('archive_sessions', { threadIds: targets });
           const failed = (data.results || []).filter(r => !r.ok);
-          showToast(failed.length ? t().archiveFailed(failed.length, failed[0].error || t().unknownError) : t().archivedSuccess);
-          state.selected.clear(); await refresh();
-        } catch (error) { showToast(error.message); }
+          const syncFailed = data.sidebarSync && !data.sidebarSync.ok;
+          const feedback = failed.length ? t().archiveFailed(failed.length, failed[0].error || t().unknownError) : syncFailed ? t().archiveSyncFailed : t().archivedSuccess;
+          await finishOperation(data, 'archive', feedback);
+        } catch (error) { handleOperationError(error); }
         finally { state.loading = false; render(); }
       }
 
       function openDelete() {
+        if (state.loading || state.operationUncertain) return;
         const targets = visibleSelection();
         if (!targets.length) return;
+        state.deleteTargets = targets;
+        const byId = new Map(state.sessions.map(session => [session.id, session]));
+        $('deleteTargets').replaceChildren(...targets.map(id => el('li', '', byId.get(id)?.title || id)));
         $('deleteHeading').textContent = t().deleteHeading(targets.length); $('confirmation').value = ''; $('confirmDelete').disabled = true;
-        $('deleteDialog').showModal(); setTimeout(() => $('confirmation').focus(), 30);
+        $('deleteDialog').showModal(); $('deleteDialog').scrollTop = 0;
+        $('confirmation').focus({ preventScroll: true });
+      }
+
+      async function finishOperation(data, operation, feedback) {
+        const succeeded = new Set((data.results || []).filter(result => result.ok).map(result => result.threadId));
+        for (const id of succeeded) { state.selected.delete(id); state.files.delete(id); }
+        // 先移除已成功项，刷新失败时也不会再把已处理会话作为目标。
+        state.sessions = operation === 'delete'
+          ? state.sessions.filter(session => !succeeded.has(session.id))
+          : state.sessions.map(session => succeeded.has(session.id) ? { ...session, archived: true } : session);
+        if (data.requiresReopen) {
+          state.operationUncertain = true;
+          $('notice').textContent = t().operationTimeout;
+          feedback += ` · ${t().operationTimeout}`;
+        }
+        render();
+        try { await refreshSessions(); }
+        catch { feedback += ` · ${t().refreshFailed}`; }
+        showToast(feedback);
+      }
+
+      function handleOperationError(error) {
+        if (error.timedOut) {
+          state.operationUncertain = true;
+          $('notice').textContent = t().operationTimeout;
+        }
+        showToast(error.timedOut ? t().operationTimeout : error.message);
       }
 
       async function performDelete(event) {
         event.preventDefault();
+        if (state.loading || state.operationUncertain) return;
         if ($('confirmation').value !== t().confirmation) return;
-        const targets = visibleSelection();
+        const targets = [...state.deleteTargets];
+        const visible = new Set(visibleSelection());
         $('deleteDialog').close();
         if (!targets.length) return;
+        if (targets.some(id => !visible.has(id))) { showToast(t().selectionChanged); return; }
         state.loading = true; render();
         try {
           const data = await tool('delete_sessions', { threadIds: targets, confirmation: t().confirmation });
           const failed = (data.results || []).filter(r => !r.ok);
           const syncFailed = data.sidebarSync && !data.sidebarSync.ok;
-          showToast(failed.length ? t().deleteFailed(failed.length, failed[0].error || t().unknownError) : syncFailed ? t().sidebarSyncFailed : t().deletedSuccess);
-          state.selected.clear(); await refresh();
-        } catch (error) { showToast(error.message); }
+          const feedback = failed.length ? t().deleteFailed(failed.length, failed[0].error || t().unknownError) : syncFailed ? t().sidebarSyncFailed : t().deletedSuccess;
+          await finishOperation(data, 'delete', feedback);
+        } catch (error) { handleOperationError(error); }
         finally { state.loading = false; render(); }
       }
 
@@ -613,6 +675,13 @@
       }));
       document.querySelectorAll('[data-locale]').forEach(button => button.addEventListener('click', () => setLocale(button.dataset.locale, 'manual')));
       $('refresh').addEventListener('click', refresh);
+      $('selectAll').addEventListener('click', () => {
+        if (state.loading || state.operationUncertain) return;
+        const available = filteredSessions().filter(session => session.deletable);
+        const allSelected = available.every(session => state.selected.has(session.id));
+        for (const session of available) allSelected ? state.selected.delete(session.id) : state.selected.add(session.id);
+        render();
+      });
       $('archive').addEventListener('click', archiveSelected);
       $('delete').addEventListener('click', openDelete);
       $('cancelDelete').addEventListener('click', () => $('deleteDialog').close());
