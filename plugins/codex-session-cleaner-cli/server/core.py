@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 SOURCE_KINDS = [
     "cli", "vscode", "exec", "appServer", "subAgent", "subAgentReview",
     "subAgentCompact", "subAgentThreadSpawn", "subAgentOther", "unknown",
